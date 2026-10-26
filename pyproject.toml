@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kohaku-kt-mcp"
+version = "0.1.0"
+description = "Kohaku KT MCP: standalone workspace tools extracted from KohakuTerrarium"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-KohakuTerrarium-1.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = ["mcp>=1.27,<2", "starlette>=0.40,<1", "uvicorn>=0.34,<1", "httpx>=0.27,<1"]
+
+[project.urls]
+Upstream = "https://github.com/Kohaku-Lab/KohakuTerrarium"
+Repository = "https://github.com/DNLINYJ/kohaku-kt-mcp-lite"
+Issues = "https://github.com/DNLINYJ/kohaku-kt-mcp-lite/issues"
+
+[project.scripts]
+kt-mcp = "kt_mcp.cli:main"
+
+[project.gui-scripts]
+kt-mcp-gui = "kt_mcp.gui:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27", "black>=24", "ruff>=0.9", "build>=1"]
+bundle = ["nuitka==4.3.1", "zstandard>=0.23,<1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.black]
+target-version = ["py310"]
+
+[tool.ruff]
+target-version = "py310"

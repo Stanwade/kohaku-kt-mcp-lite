@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kt-mcp": {
+      "command": "E:\\Agent Project\\kt-mcp\\.venv\\Scripts\\kt-mcp.exe",
+      "args": ["--workspace", "E:\\Agent Project\\KohakuTerrarium"]
+    }
+  }
+}

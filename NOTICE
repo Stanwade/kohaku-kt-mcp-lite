@@ -1,0 +1,8 @@
+Kohaku KT MCP (kt-mcp)
+Derived from KohakuTerrarium 2.1.6.
+Copyright 2024-2026 Shih-Ying Yeh (KohakuBlueLeaf) and contributors.
+https://github.com/Kohaku-Lab/KohakuTerrarium
+
+The standalone implementation changes the original transport composition,
+tool runtime, file guards, tool implementations, and process/job lifecycle.
+It retains the KohakuTerrarium License 1.0 (see LICENSE).
