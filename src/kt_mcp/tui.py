@@ -1,56 +1,19 @@
 """A curses control panel; systemd retains ownership when the panel exits."""
 
 import argparse
-import getpass
 import locale
 import os
-import secrets
 import sys
 import textwrap
 import time
 from pathlib import Path
 
-from kt_mcp.daemon import (
-    DaemonConfig,
-    client_url,
-    default_config_path,
-    load_config,
-    save_config,
-)
-from kt_mcp.desktop import DesktopSettings, client_configuration
+from kt_mcp.daemon import client_url, default_config_path, load_config
+from kt_mcp.desktop import client_configuration
+from kt_mcp.onboarding import SetupCancelled, setup_config
 from kt_mcp.service import ServiceError, ServiceManager
 
 UI_ERRORS = (ValueError, TypeError, OSError, ServiceError)
-
-
-def setup_config(path: Path, *, ask=input, ask_secret=getpass.getpass):
-    """First-run setup, before curses starts; secrets are never terminal-echoed."""
-    if path.expanduser().exists():
-        raise FileExistsError(
-            "configuration already exists; it will not be overwritten"
-        )
-    print("Kohaku KT MCP - first-time Linux setup")
-    workspace = ask(f"Workspace [{Path.cwd()}]: ").strip() or str(Path.cwd())
-    port = int(ask("Local HTTP port [8765]: ").strip() or "8765")
-    mode = ask("Connection mode: local / quick / named [local]: ").strip() or "local"
-    origin = ""
-    tunnel_token = ""
-    if mode == "named":
-        origin = ask("Public HTTPS origin (without /mcp): ").strip()
-        tunnel_token = (
-            os.environ.get("TUNNEL_TOKEN")
-            or ask_secret("Cloudflare Tunnel token (hidden): ").strip()
-        )
-    config = DaemonConfig(
-        DesktopSettings(
-            str(Path(workspace).expanduser().resolve()), port, mode, origin
-        ),
-        os.environ.get("KT_MCP_TOKEN") or secrets.token_urlsafe(32),
-        tunnel_token,
-    )
-    save_config(config, path)
-    print(f"Private configuration created: {path}")
-    return config
 
 
 class TerminalController:
@@ -280,6 +243,9 @@ def main(argv: list[str]) -> int:
         parser.error(
             "terminal initialization failed; check TERM and use an interactive terminal"
         )
+    except SetupCancelled as exc:
+        print(str(exc))
+        return 0
     except (KeyboardInterrupt, EOFError):
         return 0
     except (locale.Error, *UI_ERRORS) as exc:

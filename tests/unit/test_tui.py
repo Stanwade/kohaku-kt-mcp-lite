@@ -1,15 +1,15 @@
 import json
 import os
-import stat
 import sys
 from types import SimpleNamespace
 
 import pytest
 
 import kt_mcp.tui as module
-from kt_mcp.daemon import DaemonConfig, load_config, save_config
+from kt_mcp.daemon import DaemonConfig, save_config
 from kt_mcp.desktop import DesktopSettings
-from kt_mcp.tui import TerminalController, setup_config
+from kt_mcp.onboarding import SetupCancelled
+from kt_mcp.tui import TerminalController
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Linux terminal manager"
@@ -118,60 +118,6 @@ def test_client_configuration_explicitly_contains_only_mcp_credential(terminal):
     assert terminal.manager.calls == []
 
 
-def test_setup_creates_private_local_config_with_stable_token(tmp_path, capsys):
-    workspace = tmp_path / "workspace 中文"
-    workspace.mkdir()
-    path = tmp_path / "private/config.json"
-    answers = iter([str(workspace), "", ""])
-
-    def unexpected_secret(prompt):
-        pytest.fail("local setup must not ask for a tunnel token")
-
-    created = setup_config(
-        path, ask=lambda prompt: next(answers), ask_secret=unexpected_secret
-    )
-    loaded = load_config(path)
-    assert loaded == created
-    assert loaded.settings.workspace == str(workspace.resolve())
-    assert loaded.settings.port == 8765
-    assert loaded.settings.mode == "local"
-    assert len(loaded.token) >= 32
-    assert loaded.tunnel_token == ""
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    original = path.read_bytes()
-
-    def must_not_prompt(prompt):
-        pytest.fail("existing configuration must be preserved without prompting")
-
-    with pytest.raises(FileExistsError, match="not be overwritten"):
-        setup_config(path, ask=must_not_prompt, ask_secret=must_not_prompt)
-    assert path.read_bytes() == original
-    assert load_config(path).token == loaded.token
-    output = capsys.readouterr()
-    assert loaded.token not in output.out + output.err
-
-
-def test_named_setup_reads_tunnel_token_through_secret_prompt(tmp_path, capsys):
-    path = tmp_path / "config.json"
-    answers = iter([str(tmp_path), "9876", "named", "https://mcp.example.com"])
-    secret_prompts = []
-
-    def hidden(prompt):
-        secret_prompts.append(prompt)
-        return TUNNEL_TOKEN
-
-    setup_config(path, ask=lambda prompt: next(answers), ask_secret=hidden)
-    loaded = load_config(path)
-    assert loaded.settings.mode == "named"
-    assert loaded.settings.port == 9876
-    assert loaded.settings.public_origin == "https://mcp.example.com"
-    assert loaded.tunnel_token == TUNNEL_TOKEN
-    assert len(secret_prompts) == 1
-    output = capsys.readouterr()
-    assert TUNNEL_TOKEN not in output.out + output.err
-    assert loaded.token not in output.out + output.err
-
-
 def test_non_tty_fails_before_curses_or_setup(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
@@ -214,21 +160,39 @@ def test_root_cannot_start_default_user_panel(terminal, monkeypatch, capsys):
     assert terminal.manager.calls == []
 
 
-def test_eof_cancels_first_run_without_traceback_or_partial_config(
-    tmp_path, monkeypatch, capsys
+@pytest.mark.parametrize(
+    "cancellation",
+    [
+        EOFError(),
+        KeyboardInterrupt(),
+        SetupCancelled("Setup cancelled; no configuration was saved."),
+    ],
+    ids=["eof", "ctrl-c", "explicit-cancel"],
+)
+def test_cancelled_first_run_never_opens_panel_or_leaves_partial_config(
+    tmp_path, monkeypatch, capsys, cancellation
 ):
+    import curses
+
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     path = tmp_path / "config.json"
 
     def cancelled_setup(path):
-        raise EOFError
+        raise cancellation
+
+    def must_not_open_panel(*args):
+        pytest.fail("a cancelled setup must not open the service panel")
 
     monkeypatch.setattr(module, "setup_config", cancelled_setup)
+    monkeypatch.setattr(curses, "wrapper", must_not_open_panel)
     assert module.main(["--config", str(path)]) == 0
     assert not path.exists()
-    assert capsys.readouterr().err == ""
+    output = capsys.readouterr()
+    assert output.err == ""
+    if isinstance(cancellation, SetupCancelled):
+        assert str(cancellation) in output.out
 
 
 def test_small_terminal_ignores_hidden_stop_key(terminal, monkeypatch):
