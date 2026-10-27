@@ -1,4 +1,4 @@
-"""Exercise first-run setup through a real terminal without registering services."""
+"""Exercise onboarding and the Linux panel without registering services."""
 
 import errno
 import json
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 class TerminalSession:
     """Drive the real CLI using prompts, keeping captured credentials out of failures."""
 
-    def __init__(self, arguments, *, cwd, environment):
+    def __init__(self, arguments, *, cwd, environment, rows=30, columns=110):
         import fcntl
         import pty
         import struct
@@ -33,7 +33,9 @@ class TerminalSession:
         self.position = 0
         self.process = None
         try:
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 110, 0, 0))
+            fcntl.ioctl(
+                slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0)
+            )
             self.process = subprocess.Popen(
                 [sys.executable, "-m", "kt_mcp", *arguments],
                 stdin=slave,
@@ -315,3 +317,62 @@ def test_bare_terminal_command_enters_setup_and_cancels_without_writes(tmp_path)
         assert set(tmp_path.rglob("*")) == before
     finally:
         terminal.close()
+
+
+def test_narrow_panel_opens_details_and_help_without_exposing_credentials(tmp_path):
+    from kt_mcp.daemon import DaemonConfig, save_config
+    from kt_mcp.desktop import DesktopSettings
+
+    workspace = tmp_path / ("项目目录" * 8) / "工作区终点"
+    workspace.mkdir(parents=True)
+    config = tmp_path / ("配置目录" * 8) / "私密配置.json"
+    token = secrets.token_urlsafe(24)
+    save_config(
+        DaemonConfig(DesktopSettings(str(workspace), mode="local"), token), config
+    )
+    original = config.read_bytes()
+    assert config.stat().st_mode & 0o077 == 0
+
+    name = "kt-mcp-onboard-" + secrets.token_hex(6)
+    environment = terminal_environment(tmp_path)
+    systemd_available = unit_status(name, environment) is not None
+    assert_unregistered(name, environment, systemd_available=systemd_available)
+    terminal = TerminalSession(
+        ["tui", "--config", str(config), "--name", name],
+        cwd=workspace,
+        environment=environment,
+        rows=18,
+        columns=64,
+    )
+    try:
+        terminal.expect("Quit panel")
+        for label in ("State:", "PID:", "Restarts:", "Boot:", "Linger:", "[v]", "[?]"):
+            if label.encode("utf-8") not in terminal.output:
+                pytest.fail(f"Narrow panel is missing {label}", pytrace=False)
+
+        terminal.send("v")
+        terminal.expect("Service details")
+        terminal.expect("Workspace")
+        # Curses can reuse part of an old label; newly drawn path text is stable.
+        terminal.expect("项目目录")
+        terminal.expect("配置目录")
+        terminal.send("\x1b[6~")
+        terminal.expect("Local HTTP port: 8765")
+        terminal.send("\n")
+
+        terminal.send("?")
+        terminal.expect("Panel help")
+        terminal.expect("q quits this panel")
+        terminal.send("\n")
+        terminal.send("q")
+        terminal.finish()
+
+        # Substantial pieces catch a secret even if a narrow popup wraps it.
+        for secret in (token, token[:12], token[-12:]):
+            terminal.assert_hidden(secret)
+        if config.read_bytes() != original:
+            pytest.fail("Viewing the panel changed its configuration", pytrace=False)
+        assert not config.with_suffix(".status.json").exists()
+    finally:
+        terminal.close()
+        assert_unregistered(name, environment, systemd_available=systemd_available)

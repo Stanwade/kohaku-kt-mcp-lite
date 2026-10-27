@@ -3,9 +3,10 @@
 import argparse
 import locale
 import os
+import shlex
 import sys
-import textwrap
 import time
+import unicodedata
 from pathlib import Path
 
 from kt_mcp.daemon import client_url, default_config_path, load_config
@@ -16,28 +17,292 @@ from kt_mcp.service import ServiceError, ServiceManager
 UI_ERRORS = (ValueError, TypeError, OSError, ServiceError)
 
 
+def _clean(text: str) -> str:
+    return "".join(character if character.isprintable() else " " for character in text)
+
+
+def _cells(text: str) -> list[tuple[str, int]]:
+    """Keep combining marks attached when clipping ordinary terminal text."""
+    cells = []
+    for character in _clean(text):
+        if unicodedata.category(character) in {"Mn", "Me"}:
+            if cells:
+                previous, width = cells[-1]
+                cells[-1] = (previous + character, width)
+            else:
+                cells.append((character, 0))
+        else:
+            width = 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+            cells.append((character, width))
+    return cells
+
+
+def display_width(text: str) -> int:
+    """Terminal cells for printable text, including wide Chinese characters."""
+    return sum(width for _, width in _cells(text))
+
+
+def clip_display(text: str, width: int) -> str:
+    """Return a prefix that fits, without splitting a wide or combining character."""
+    if width <= 0:
+        return ""
+    parts = []
+    used = 0
+    for character, cells in _cells(text):
+        if used + cells > width:
+            break
+        parts.append(character)
+        used += cells
+    return "".join(parts)
+
+
+def ellipsize(text: str, width: int) -> str:
+    """Fit a path or label using a middle ellipsis while preserving its tail."""
+    if width <= 0:
+        return ""
+    cells = _cells(text)
+    if sum(size for _, size in cells) <= width:
+        return "".join(character for character, _ in cells)
+    left = []
+    used = 0
+    for character, size in cells:
+        if used + size > (width - 1) // 2:
+            break
+        left.append(character)
+        used += size
+    right = []
+    remaining = width - 1 - used
+    for character, size in reversed(cells[len(left) :]):
+        if size > remaining:
+            break
+        right.append(character)
+        remaining -= size
+    return "".join(left) + "…" + "".join(reversed(right))
+
+
+def wrap_display(text: str, width: int) -> list[str]:
+    """Wrap at terminal-cell boundaries; preserve spaces and unbroken paths."""
+    if width < 2:
+        raise ValueError("display width must be at least 2")
+    lines = []
+    for source in text.split("\n"):
+        parts = []
+        used = 0
+        for character, size in _cells(source):
+            if used + size > width:
+                lines.append("".join(parts))
+                parts = []
+                used = 0
+            parts.append(character)
+            used += size
+        lines.append("".join(parts))
+    return lines
+
+
+def next_steps(
+    status: dict[str, str],
+    *,
+    linger: str = "unknown",
+    system: bool = False,
+    error: str = "",
+) -> tuple[str, str]:
+    """Two short guidance lines based on systemd process and persistence state."""
+    if error or not status:
+        return (
+            "Next: [l] Logs or [?] Help; status is unavailable.",
+            "Status will be checked again automatically.",
+        )
+    load = status.get("LoadState", "")
+    active = status.get("ActiveState", "")
+    if load == "not-found":
+        return (
+            (
+                "Next: [?] Help to install a system unit with --run-as."
+                if system
+                else "Next: [i] Register/start this user service."
+            ),
+            "The saved configuration will be used for installation.",
+        )
+    if load in {"error", "bad-setting", "masked"}:
+        action = "Next: [l] Logs and [?] Help to inspect the unit."
+    elif active == "failed":
+        action = "Next: [l] Logs to diagnose; [r] Restart to try again."
+    elif active == "activating":
+        action = "Next: [l] Logs to follow startup."
+    elif active in {"deactivating", "reloading"}:
+        action = "Next: [l] Logs to follow the state change."
+    elif active == "inactive":
+        action = "Next: [s] Start this registered service."
+    elif active == "active":
+        action = "Next: [c] Client JSON; check MCP startup in [l] Logs."
+    else:
+        action = "Next: [l] Logs or [?] Help to inspect this state."
+    reminders = []
+    if status.get("UnitFileState") != "enabled":
+        reminders.append("Boot: [e] Enable.")
+    if not system and linger != "yes":
+        reminders.append("Linger: [g] Enable (see ?).")
+    return action, " ".join(reminders) or "Panel exit leaves the service unchanged."
+
+
 class TerminalController:
     def __init__(self, manager: ServiceManager, config_path: Path):
         self.manager = manager
         self.config_path = config_path.expanduser().absolute()
         self.config = load_config(self.config_path)
-        self.note = "Press i to register/start, or choose an action below."
+        self.note = ""
+        self.status = {}
+        self.linger = "unknown"
+        self.logs = ""
+        self.refresh_error = ""
+        self._secrets = {
+            secret for secret in (self.config.token, self.config.tunnel_token) if secret
+        }
 
     def redact(self, text: str) -> str:
-        for secret in (self.config.token, self.config.tunnel_token):
-            if secret:
-                text = text.replace(secret, "[REDACTED]")
+        self._secrets.update(
+            secret for secret in (self.config.token, self.config.tunnel_token) if secret
+        )
+        for secret in sorted(self._secrets, key=len, reverse=True):
+            text = text.replace(secret, "[REDACTED]")
         return text
+
+    def refresh(self):
+        """Publish a fresh snapshot, or discard old state after any polling error."""
+        try:
+            self.config = load_config(self.config_path)
+            status = self.manager.status()
+            linger = self.manager.linger_status()
+            logs = self.manager.logs(8)
+        except UI_ERRORS as exc:
+            self.status = {}
+            self.linger = "unknown"
+            self.logs = ""
+            self.refresh_error = self.redact(str(exc))
+            return
+        self.status = status
+        self.linger = linger
+        self.logs = self.redact(logs)
+        self.refresh_error = ""
+
+    def _command(self, *arguments: str) -> str:
+        return shlex.join([os.path.abspath(sys.executable), "-m", "kt_mcp", *arguments])
+
+    def help_text(self) -> str:
+        common = ["--name", self.manager.name]
+        if self.manager.system:
+            common.append("--system")
+        lines = [
+            "First use:",
+            (
+                "System units require an explicit ordinary --run-as user. "
+                "Install with the command below; i is unavailable in this scope."
+                if self.manager.system
+                else "i registers the saved configuration, enables boot and user linger, "
+                "and starts the service."
+            ),
+            "",
+            "s starts; x stops; r restarts. l opens logs.",
+            (
+                "e enables boot. d only disables future automatic startup; "
+                "it does not stop a running service."
+            ),
+            "c explicitly displays client credentials. v shows details without credentials.",
+            "q quits this panel and leaves the service unchanged. Uppercase keys also work.",
+            "State is reported by systemd. Use l to check MCP startup.",
+            (
+                "Existing configurations keep their saved workspace; "
+                "changing your shell directory does not reconfigure the service."
+            ),
+        ]
+        if not self.manager.system:
+            import pwd
+
+            account = pwd.getpwuid(os.geteuid()).pw_name
+            lines.extend(
+                [
+                    "",
+                    "g enables user linger so the user service can continue after logout.",
+                    "If enabling linger is denied, run in another terminal:",
+                    shlex.join(["sudo", "loginctl", "enable-linger", account]),
+                    "Then retry i for the first install/start, or g for linger only.",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Reopen this panel with the same configuration and unit:",
+                self._command("tui", "--config", str(self.config_path), *common),
+                "",
+                "Inspect this unit:",
+                self._command("service", "status", *common),
+                "",
+                (
+                    "Install as root; replace RUN_USER with an ordinary account:"
+                    if self.manager.system
+                    else "Install/start this saved configuration from a terminal:"
+                ),
+                self._command(
+                    "service",
+                    "install",
+                    "--config",
+                    str(self.config_path),
+                    *common,
+                    "--now",
+                    *(
+                        ["--run-as", "RUN_USER"]
+                        if self.manager.system
+                        else ["--linger"]
+                    ),
+                ),
+            ]
+        )
+        return self.redact("\n".join(lines))
+
+    def details_text(self) -> str:
+        settings = self.config.settings
+        fields = [
+            ("Workspace", settings.workspace),
+            ("Configuration file", str(self.config_path)),
+            ("Unit file", str(self.manager.unit_path)),
+            ("Loaded unit file", self.status.get("FragmentPath") or "not reported"),
+            ("Unit", self.manager.unit_name),
+            ("Scope", "system" if self.manager.system else "user"),
+            ("Load state", self.status.get("LoadState") or "unknown"),
+            ("State", self.status.get("ActiveState") or "unknown"),
+            ("Substate", self.status.get("SubState") or "unknown"),
+            ("PID", self.status.get("MainPID") or "unknown"),
+            ("Restarts", self.status.get("NRestarts") or "unknown"),
+            ("Last exit status", self.status.get("ExecMainStatus") or "unknown"),
+            ("Boot", self.status.get("UnitFileState") or "unknown"),
+            ("Linger", self.linger),
+            ("Connection mode", settings.mode),
+            ("Local HTTP port", str(settings.port)),
+        ]
+        if settings.public_origin:
+            fields.append(("Public HTTPS origin", settings.public_origin))
+        if self.refresh_error:
+            fields.append(("Status unavailable", self.refresh_error))
+        lines = [f"{label}: {value}" for label, value in fields]
+        lines.extend(
+            ["", "State describes the systemd process; check logs for MCP startup."]
+        )
+        return self.redact("\n".join(lines))
 
     def act(self, key: str):
         """Explicit management actions only; quitting never stops the daemon."""
+        key = key.lower()
+        if key == "?":
+            return "Panel help", self.help_text()
+        if key == "v":
+            return "Service details", self.details_text()
         if key == "i":
             if self.manager.system:
                 raise ValueError(
                     "Install a system unit first with service install --system --run-as USER."
                 )
             self.manager.install(self.config_path, now=True, linger=True)
-            self.note = "Service registered and enabled; check readiness in the logs."
+            self.note = "Service registered and enabled; check MCP startup in the logs."
         elif key in {"s", "x", "r", "e", "d"}:
             action = {
                 "s": "start",
@@ -47,7 +312,11 @@ class TerminalController:
                 "d": "disable",
             }[key]
             self.manager.control(action)
-            self.note = f"{action}: request completed."
+            self.note = (
+                "Boot disabled; a running service is left unchanged."
+                if key == "d"
+                else f"{action}: request completed."
+            )
         elif key == "g":
             self.manager.enable_linger()
             self.note = "Linger enabled: the user service can survive logout."
@@ -62,22 +331,17 @@ class TerminalController:
         return None
 
 
-def _clean(text: str) -> str:
-    return "".join(character if character.isprintable() else " " for character in text)
-
-
 def _put(screen, row, column, text, attribute=0):
-    # Terminals count wide characters differently; curses clips and may report
-    # the bottom-right cell as an error after drawing it. Both are harmless.
     import curses
 
     height, width = screen.getmaxyx()
     if 0 <= row < height and 0 <= column < width - 1:
+        clipped = clip_display(str(text), width - column - 1)
         try:
-            screen.addnstr(
-                row, column, _clean(str(text)), width - column - 1, attribute
-            )
+            # addnstr counts characters; the text has already been clipped by cells.
+            screen.addnstr(row, column, clipped, len(clipped), attribute)
         except curses.error:
+            # Some terminals report an error after drawing their bottom-right cell.
             pass
 
 
@@ -89,25 +353,24 @@ def _popup(screen, title: str, body: str):
     try:
         while True:
             height, width = screen.getmaxyx()
-            lines = [
-                part
-                for line in body.splitlines()
-                for part in (textwrap.wrap(_clean(line), max(10, width - 4)) or [""])
-            ]
             page = max(1, height - 4)
+            lines = wrap_display(body, width - 4) if width >= 6 else []
             offset = max(0, min(offset, max(0, len(lines) - page)))
             screen.erase()
             _put(screen, 0, 1, title, curses.A_BOLD)
-            for row, line in enumerate(lines[offset : offset + page], 2):
-                _put(screen, row, 2, line)
+            if height < 4 or width < 6:
+                _put(screen, 1, 0, "Resize terminal; q returns.")
+            else:
+                for row, line in enumerate(lines[offset : offset + page], 2):
+                    _put(screen, row, 2, line)
             _put(screen, height - 1, 1, "Up/Down/PgUp/PgDn: scroll | Enter/Esc/q: back")
             screen.refresh()
             key = screen.getch()
-            if key in (ord("q"), 27, 10, 13):
+            if key in (ord("q"), ord("Q"), 27, 10, 13):
                 return
-            if key in (curses.KEY_DOWN, ord("j")):
+            if key in (curses.KEY_DOWN, ord("j"), ord("J")):
                 offset += 1
-            elif key in (curses.KEY_UP, ord("k")):
+            elif key in (curses.KEY_UP, ord("k"), ord("K")):
                 offset -= 1
             elif key == curses.KEY_NPAGE:
                 offset += page
@@ -126,19 +389,10 @@ def _screen(screen, controller: TerminalController):
         pass
     screen.keypad(True)
     screen.timeout(250)
-    status = {}
-    logs = ""
-    linger = "unknown"
     next_refresh = 0.0
     while True:
         if time.monotonic() >= next_refresh:
-            try:
-                status = controller.manager.status()
-                controller.config = load_config(controller.config_path)
-                linger = controller.manager.linger_status()
-                logs = controller.redact(controller.manager.logs(8))
-            except UI_ERRORS as exc:
-                controller.note = controller.redact(str(exc))
+            controller.refresh()
             next_refresh = time.monotonic() + 2
         height, width = screen.getmaxyx()
         screen.erase()
@@ -146,60 +400,106 @@ def _screen(screen, controller: TerminalController):
         if height < 18 or width < 64:
             _put(screen, 2, 1, "Resize terminal to at least 64 x 18. Press q to quit.")
         else:
+            available = width - 4
             config = controller.config.settings
+            status = controller.status
             scope = "System" if controller.manager.system else "User"
-            _put(screen, 2, 2, f"Unit: {controller.manager.unit_name}   Scope: {scope}")
+            suffix = f"  Scope: {scope}"
+            unit = ellipsize(
+                controller.redact(controller.manager.unit_name),
+                available - display_width("Unit: " + suffix),
+            )
+            _put(screen, 1, 2, f"Unit: {unit}{suffix}")
+            state = status.get("ActiveState") or "unknown"
+            if status.get("SubState"):
+                state += "/" + status["SubState"]
+            suffix = (
+                f"  PID: {status.get('MainPID') or '?'}"
+                f" Restarts: {status.get('NRestarts') or '?'}"
+            )
+            state = ellipsize(state, available - display_width("State: " + suffix))
+            _put(screen, 2, 2, controller.redact(f"State: {state}{suffix}"))
+            boot = status.get("UnitFileState") or "unknown"
             _put(
                 screen,
                 3,
                 2,
-                f"State: {status.get('ActiveState', '?')} / {status.get('SubState', '?')}",
+                controller.redact(f"Boot: {boot}   Linger: {controller.linger}"),
             )
             _put(
                 screen,
                 4,
                 2,
-                f"Boot: {status.get('UnitFileState', '?')}   "
-                f"PID: {status.get('MainPID', '0')}   Restarts: {status.get('NRestarts', '0')}   Linger: {linger}",
+                "Workspace: "
+                + ellipsize(controller.redact(config.workspace), available - 11),
             )
-            _put(screen, 5, 2, f"Workspace: {config.workspace}")
-            _put(screen, 6, 2, f"Mode: {config.mode}   Local port: {config.port}")
-            _put(screen, 7, 2, f"Config: {controller.config_path}")
             _put(
                 screen,
-                8,
+                5,
                 2,
-                "systemd owns the service. Closing this panel keeps it running.",
+                "Config: "
+                + ellipsize(
+                    controller.redact(str(controller.config_path)), available - 8
+                ),
             )
-            _put(screen, 10, 2, "[i] Install/start  [s] Start  [x] Stop  [r] Restart")
+            _put(screen, 6, 2, f"Mode: {config.mode}   Local port: {config.port}")
             _put(
-                screen, 11, 2, "[e] Enable boot   [d] Disable boot   [g] Enable linger"
+                screen,
+                7,
+                2,
+                "State tracks systemd; use [l] Logs to verify MCP startup.",
             )
-            _put(screen, 12, 2, "[l] Logs          [c] Client JSON    [q] Quit panel")
+            action, persistence = next_steps(
+                status,
+                linger=controller.linger,
+                system=controller.manager.system,
+                error=controller.refresh_error,
+            )
+            _put(screen, 8, 2, action, curses.A_BOLD)
+            _put(screen, 9, 2, persistence)
+            service_actions = "[s] Start  [x] Stop  [r] Restart"
+            if not controller.manager.system:
+                service_actions = "[i] Install/start  " + service_actions
+            _put(screen, 10, 2, service_actions)
+            boot_actions = "[e] Enable boot   [d] Disable boot"
+            if not controller.manager.system:
+                boot_actions += "   [g] Enable linger"
+            _put(screen, 11, 2, boot_actions)
+            _put(screen, 12, 2, "[l] Logs  [c] Client JSON  [v] Details  [?] Help")
+            _put(screen, 13, 2, "[q] Quit panel (service keeps its current state)")
             _put(screen, 14, 2, "Recent service log", curses.A_BOLD)
-            for row, line in enumerate(logs.splitlines()[-max(0, height - 18) :], 15):
-                if row >= height - 2:
-                    break
+            for row, line in enumerate(
+                controller.logs.splitlines()[-(height - 16) :], 15
+            ):
                 _put(screen, row, 2, line)
-            _put(screen, height - 1, 1, controller.note)
+            _put(
+                screen,
+                height - 1,
+                1,
+                controller.redact(controller.refresh_error or controller.note)
+                or "Press ? for help; v shows full paths.",
+            )
         screen.refresh()
         key = screen.getch()
-        if key in (ord("q"), 27):
+        if key in (ord("q"), ord("Q"), 27):
             return
         if height < 18 or width < 64:
             continue
         if key < 0 or key > 255:
             continue
-        character = chr(key)
-        if character not in "isxredglc":
+        character = chr(key).lower()
+        if character not in "isxredglcv?":
             continue
-        controller.note = "Working..."
-        _put(screen, height - 1, 1, controller.note)
-        screen.refresh()
+        previous_note = controller.note
+        if character not in "v?":
+            controller.note = "Working..."
+            _put(screen, height - 1, 1, controller.note)
+            screen.refresh()
         try:
             popup = controller.act(character)
             if popup:
                 _popup(screen, *popup)
+                controller.note = previous_note
         except UI_ERRORS as exc:
             controller.note = controller.redact(str(exc))
             _popup(screen, "Action could not be completed", controller.note)
