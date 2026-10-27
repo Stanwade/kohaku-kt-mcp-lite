@@ -51,7 +51,7 @@ kt-mcp
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-  bash -s -- --version 0.2.1 \
+  bash -s -- --version 0.2.2 \
     --prefix "$HOME/apps/kt-mcp" \
     --bin-dir "$HOME/.local/bin" \
     --python /usr/bin/python3
@@ -74,7 +74,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 (
   set -o pipefail
   curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-    bash -s -- --version 0.2.1
+    bash -s -- --version 0.2.2
 )
 ```
 
@@ -82,7 +82,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 
 ### 手动下载发行包
 
-从同一个 Release 下载 `kt-mcp-0.2.1-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+从同一个 Release 下载 `kt-mcp-0.2.2-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
@@ -91,8 +91,8 @@ sha256sum --ignore-missing -c SHA256SUMS
 确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
 
 ```bash
-tar -xzf kt-mcp-0.2.1-linux.tar.gz
-cd kt-mcp-0.2.1-linux
+tar -xzf kt-mcp-0.2.2-linux.tar.gz
+cd kt-mcp-0.2.2-linux
 bash ./install.sh
 ```
 
@@ -111,7 +111,7 @@ bash scripts/install_linux.sh
 本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
 
 ```bash
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.2.1-py3-none-any.whl
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.2.2-py3-none-any.whl
 ```
 
 `--source` 只用于本地安装器，在线入口不接受它。
@@ -278,7 +278,7 @@ Quick Tunnel 必须等服务启动后才能导出当前公网地址，重启可�
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python scripts/build_linux.py
-.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.2.1-linux.tar.gz --systemd
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.2.2-linux.tar.gz --systemd
 ```
 
 构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。

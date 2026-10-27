@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kohaku-kt-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "Standalone workspace MCP tools with Linux systemd/TUI, derived from KohakuTerrarium"
 readme = "README.md"
 requires-python = ">=3.10"
