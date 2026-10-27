@@ -164,3 +164,28 @@ kt-mcp client-config
 Quick Tunnel 必须等服务启动后才能导出当前公网地址，重启可能更换地址。固定域名和本机地址可提前导出。运行状态写入同目录的 `config.status.json`（同样 `0600`），正常停止后移除。
 
 新增的管理命令仅用于 Linux；Windows 继续使用桌面 GUI。原来的 `kt-mcp --workspace ...` stdio 和 `--transport http` 用法保持兼容。
+
+## 自行构建与验收
+
+在源码目录中创建开发环境，再构建发布包：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python scripts/build_linux.py
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.2.0-linux.tar.gz --systemd
+```
+
+构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包和外层 `SHA256SUMS`；安装包内另有校验清单。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。
+
+验收会在临时目录重新安装 wheel，使用安装后的命令创建临时工作区，调用全部 12 个 MCP 工具，并检查 Python 工具来自新虚拟环境。`--systemd` 额外验证临时用户 unit、TUI 退出后后台继续运行；结束时移除临时服务和安装目录。当前用户必须能访问 `systemctl --user`。不带 `--systemd` 时只运行独立 daemon 进行协议验收。报告默认写入 `dist/linux-smoke.json`，可用 `--report` 修改。
+
+项目的普通测试使用 `python -m pytest`。真实 systemd 用例需要显式启用：
+
+```bash
+KT_MCP_TEST_SYSTEMD=1 .venv/bin/python -m pytest tests/integration/test_systemd_lifecycle.py -q -k independent_lifetime
+```
+
+CI 在 Ubuntu 22.04 / Python 3.10、Ubuntu 24.04 / Python 3.12、Windows / Python 3.12 上运行回归测试，并在 Ubuntu 验证真实用户级/系统级 unit 和全新安装包。推送与包版本匹配的 `v*` 标签后，只有全部测试和安装验收成功，流程才会上传校验过的资产并公开 Release。见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
+
+已验证目标为 Ubuntu x86_64。其他 Linux 发行版和 ARM64 需要在各自环境中再做验收。

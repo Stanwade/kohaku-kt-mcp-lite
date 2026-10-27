@@ -1,0 +1,124 @@
+name: CI and Linux release
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.10"
+          - os: ubuntu-24.04
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Formatting and lint
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          python -m black --check src tests scripts/build_linux.py scripts/verify_linux.py
+          python -m ruff check src tests scripts/build_linux.py scripts/verify_linux.py
+          bash -n scripts/install_linux.sh
+      - name: Unit and MCP integration tests
+        run: python -m pytest -q
+
+  linux-package:
+    name: Ubuntu package and real systemd
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Prepare the ordinary user's systemd manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: User service, crash recovery, child cleanup, and TUI exit
+        env:
+          KT_MCP_TEST_SYSTEMD: "1"
+        run: python -m pytest tests/integration/test_systemd_lifecycle.py -q -k independent_lifetime
+      - name: System service runs as the requested ordinary account
+        run: |
+          sudo env KT_MCP_TEST_SYSTEMD=1 KT_MCP_SYSTEM_TEST_USER="$(id -un)" "$(command -v python)" -m pytest tests/integration/test_systemd_lifecycle.py -q -k ordinary_account
+      - name: Build wheel, source archive, Linux bundle, and checksums
+        run: python scripts/build_linux.py
+      - name: Verify the installed Linux release and all MCP tools
+        run: |
+          python scripts/verify_linux.py --archive dist/linux/kt-mcp-$(python -c "from kt_mcp import __version__; print(__version__)")-linux.tar.gz --systemd
+      - name: Upload Linux distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-distributions
+          path: dist/linux/*
+          if-no-files-found: error
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-verification-report
+          path: dist/linux-smoke.json
+          if-no-files-found: warn
+
+  release:
+    name: Publish verified tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, linux-package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-distributions
+          path: dist/linux
+      - name: Verify downloaded asset checksums
+        working-directory: dist/linux
+        run: sha256sum -c SHA256SUMS
+      - name: Publish release after every verification gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c "import sys; sys.path.insert(0, 'src'); from kt_mcp import __version__; print(__version__)")
+          test "$RELEASE_TAG" = "v$version"
+          gh release create "$RELEASE_TAG" dist/linux/* --verify-tag --draft --title "Kohaku KT MCP $RELEASE_TAG - Linux service and TUI" --notes-file RELEASE_NOTES.md
+          gh release edit "$RELEASE_TAG" --draft=false

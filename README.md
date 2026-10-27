@@ -1,14 +1,28 @@
 # Kohaku KT MCP Lite
 
-KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI 和 Cloudflare Tunnel 自动接入。
+KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI、Linux TUI / systemd 管理和 Cloudflare Tunnel 自动接入。
 
-Windows 用户可在 [Releases](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases) 下载单文件 EXE，双击运行，无需安装 Python。
-Linux / Ubuntu 的无桌面安装、TUI 管理面板、持久化配置和 systemd 后台服务见 [Ubuntu 指南](UBUNTU.md)。
+Linux / Ubuntu 用户可在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 下载安装包，按 [Ubuntu 指南](UBUNTU.md) 安装并运行 `kt-mcp tui`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
+Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.2.0 提供 Linux 安装包、通用 Python wheel 和源码包。
 源码安装、客户端连接和自行打包的方法见下文。
 
 A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
 The directory and executable are named `kt-mcp`; the Python distribution is `kohaku-kt-mcp`.
 No KohakuTerrarium installation, LLM provider, API key, Agent, or Studio is required.
+
+## Ubuntu quick start
+
+```bash
+sudo apt-get install -y python3 python3-venv bash coreutils ca-certificates
+# In a source checkout; for an extracted release bundle, use bash install.sh.
+bash scripts/install_linux.sh
+export PATH="$HOME/.local/bin:$PATH"
+kt-mcp tui
+```
+
+首次 TUI 向导建立配置后，按 `i` 注册并启动用户服务、开启 linger；按 `q` 退出面板。
+也可使用 CLI：`kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
+配置、固定域名、系统级 unit、升级及验证说明见 [UBUNTU.md](UBUNTU.md)。
 
 ## Quick start
 

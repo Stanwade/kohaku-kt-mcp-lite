@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kohaku-kt-mcp"
-version = "0.1.0"
-description = "Kohaku KT MCP: standalone workspace tools extracted from KohakuTerrarium"
+version = "0.2.0"
+description = "Standalone workspace MCP tools with Linux systemd/TUI, derived from KohakuTerrarium"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "LicenseRef-KohakuTerrarium-1.0"
@@ -14,8 +14,9 @@ dependencies = ["mcp>=1.27,<2", "starlette>=0.40,<1", "uvicorn>=0.34,<1", "httpx
 
 [project.urls]
 Upstream = "https://github.com/Kohaku-Lab/KohakuTerrarium"
-Repository = "https://github.com/DNLINYJ/kohaku-kt-mcp-lite"
-Issues = "https://github.com/DNLINYJ/kohaku-kt-mcp-lite/issues"
+Repository = "https://github.com/Stanwade/kohaku-kt-mcp-lite"
+Issues = "https://github.com/Stanwade/kohaku-kt-mcp-lite/issues"
+Documentation = "https://github.com/Stanwade/kohaku-kt-mcp-lite/blob/main/UBUNTU.md"
 
 [project.scripts]
 kt-mcp = "kt_mcp.cli:main"

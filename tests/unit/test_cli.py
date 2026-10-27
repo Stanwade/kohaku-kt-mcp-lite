@@ -1,5 +1,6 @@
 import pytest
 
+from kt_mcp import __version__
 from kt_mcp.cli import main
 
 
@@ -11,7 +12,7 @@ def test_help_version_missing_workspace_and_http_token(tmp_path, capsys, monkeyp
     with pytest.raises(SystemExit) as version_exit:
         main(["--version"])
     assert version_exit.value.code == 0
-    assert "Kohaku KT MCP 0.1.0" in capsys.readouterr().out
+    assert f"Kohaku KT MCP {__version__}" in capsys.readouterr().out
     with pytest.raises(SystemExit) as missing_exit:
         main(["--workspace", str(tmp_path / "missing")])
     assert missing_exit.value.code == 2
