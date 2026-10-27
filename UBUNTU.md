@@ -17,8 +17,9 @@ sudo apt-get install -y python3 python3-venv bash coreutils ca-certificates
 ```bash
 bash scripts/install_linux.sh
 export PATH="$HOME/.local/bin:$PATH"
-kt-mcp tui
 ```
+
+安装完成后，先切换到希望 MCP 访问的项目目录，再运行 `kt-mcp` 或 `kt-mcp tui`。首次向导会明确展示该目录作为默认工作区；可以直接回车使用，也可输入其他已有目录。安装目录和工作目录可以完全不同。
 
 在 Linux 发行包解压目录中使用 `bash install.sh`，它会安装包内的 wheel。首次安装需要联网获取 Python 依赖。Python 要求 3.10 或以上，不需要向系统 Python 安装项目依赖。
 
@@ -47,6 +48,10 @@ kt-mcp service start
 MCP 的 Bash/Python 命令具有服务运行账户的权限。使用能访问目标工作区的普通账户，不要以 root 身份开放 MCP。
 
 ## 初始化持久化配置
+
+只创建配置时，在交互终端运行 `kt-mcp init` 即可进入与 TUI 相同的引导。`kt-mcp init --port 9000` 等显式选项会作为向导中的预填值保留，已有配置不会被覆盖。
+
+脚本调用时明确提供 `--workspace`，这样会直接初始化，不读取交互输入；使用当前目录可写 `kt-mcp init --workspace .`。例如：
 
 ```bash
 mkdir -p "$HOME/workspace"
@@ -167,7 +172,7 @@ kt-mcp client-config
 
 Quick Tunnel 必须等服务启动后才能导出当前公网地址，重启可能更换地址。固定域名和本机地址可提前导出。运行状态写入同目录的 `config.status.json`（同样 `0600`），正常停止后移除。
 
-新增的管理命令仅用于 Linux；Windows 继续使用桌面 GUI。原来的 `kt-mcp --workspace ...` stdio 和 `--transport http` 用法保持兼容。
+新增的管理命令仅用于 Linux；Windows 继续使用桌面 GUI。Linux 中仅当完全无参数且 stdin、stdout 都是交互终端时，`kt-mcp` 会直接进入 TUI。通过管道启动的 MCP 客户端继续使用 stdio；使用 PTY 的客户端应明确传入 `--transport stdio`。原来的 `kt-mcp --workspace ...` stdio 和 `--transport http` 用法保持兼容。非交互 `init` 缺少 `--workspace` 时会明确报错，不会读取协议输入。
 
 ## 自行构建与验收
 

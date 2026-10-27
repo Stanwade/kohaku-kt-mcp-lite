@@ -17,11 +17,12 @@ sudo apt-get install -y python3 python3-venv bash coreutils ca-certificates
 # In a source checkout; for an extracted release bundle, use bash install.sh.
 bash scripts/install_linux.sh
 export PATH="$HOME/.local/bin:$PATH"
-kt-mcp tui
 ```
 
+安装后先进入希望 MCP 访问的项目目录，再运行 `kt-mcp`（或 `kt-mcp tui`）。首次向导会显示当前目录：Enter 使用默认目录，也可输入其他已有路径，输入错误可重试，保存前可返回修改或取消。
+
 首次 TUI 向导建立配置后，按 `i` 注册并启动用户服务、开启 linger；按 `q` 退出面板。
-也可使用 CLI：`kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
+只创建配置可以运行 `kt-mcp init`，它在交互终端进入同一套向导。脚本中明确指定 `kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
 配置、固定域名、系统级 unit、升级及验证说明见 [UBUNTU.md](UBUNTU.md)。
 
 ## Quick start
@@ -34,9 +35,8 @@ python -m venv .venv
 .\.venv\Scripts\kt-mcp.exe --workspace 'E:\Agent Project\KohakuTerrarium'
 ```
 
-The default transport is **stdio**. The client launches the server and owns its lifetime.
-Starting it manually waits for MCP messages on stdin; it does not present a chat prompt.
-Logs go to stderr and stdout is reserved for the protocol.
+The protocol transport defaults to **stdio**. A client using pipes launches the server and owns its lifetime; protocol stdout remains reserved for MCP messages and logs go to stderr.
+On Linux only, running `kt-mcp` with no arguments and interactive stdin **and** stdout opens the TUI. Use `kt-mcp --transport stdio` to explicitly select the protocol even in a terminal or a PTY-based client. Explicit arguments, non-interactive calls, and Windows keep their existing command-line behavior.
 
 On Linux/macOS, use `.venv/bin/python` and `.venv/bin/kt-mcp` instead.
 

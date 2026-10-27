@@ -149,6 +149,12 @@ if (( ! kt_no_link )); then
     printf 'Command link: %s\n' "$kt_link"
 fi
 printf 'Installed CLI: %s\n' "$kt_target"
-printf 'Open the terminal manager: %q tui\n' "$kt_target"
+printf 'Next steps:\n'
+printf '  1. Change into the existing project directory you want MCP to access.\n'
+printf '     Example: cd -- /path/to/your/project\n'
+printf '  2. Open the terminal manager from that directory:\n'
+printf '     %q tui\n' "$kt_target"
+printf 'During first-time setup, Enter uses that launch directory as the workspace.\n'
+printf 'You can enter a different path; review the displayed workspace before saving.\n'
 printf 'After upgrading, restart existing services with: %q service restart\n' "$kt_target"
 printf 'Include --name NAME and/or --system when managing a non-default service.\n'

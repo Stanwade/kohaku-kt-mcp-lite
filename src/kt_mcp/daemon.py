@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import secrets
+import shlex
 import signal
 import stat
 import sys
@@ -218,7 +219,11 @@ def main(argv: list[str]) -> int:
         "init", help="Create a private, persistent daemon configuration"
     )
     init.add_argument("--config", type=Path, default=default_config_path())
-    init.add_argument("--workspace", type=Path, required=True)
+    init.add_argument(
+        "--workspace",
+        type=Path,
+        help="Directory for MCP tools; omit to choose interactively in a terminal",
+    )
     init.add_argument("--port", type=int, default=8765)
     init.add_argument("--mode", choices=("local", "quick", "named"), default="local")
     init.add_argument("--public-origin", default="")
@@ -231,20 +236,46 @@ def main(argv: list[str]) -> int:
         parser.error("daemon management requires Linux; use the desktop GUI on Windows")
     try:
         if args.command == "init":
-            config = DaemonConfig(
-                DesktopSettings(
-                    str(args.workspace.expanduser().resolve()),
-                    args.port,
-                    args.mode,
-                    args.public_origin,
-                    args.cloudflared,
-                ),
-                os.environ.get("KT_MCP_TOKEN") or secrets.token_urlsafe(32),
-                os.environ.get("TUNNEL_TOKEN", ""),
+            if args.workspace is None:
+                if not sys.stdin.isatty() or not sys.stdout.isatty():
+                    parser.error(
+                        "init needs --workspace PATH without an interactive terminal; "
+                        "use kt-mcp init --workspace . for the current directory"
+                    )
+                from kt_mcp.onboarding import SetupCancelled, setup_config
+
+                try:
+                    setup_config(
+                        args.config,
+                        defaults=DesktopSettings(
+                            port=args.port,
+                            mode=args.mode,
+                            public_origin=args.public_origin,
+                            cloudflared=args.cloudflared,
+                        ),
+                    )
+                except SetupCancelled as exc:
+                    print(str(exc))
+                    return 0
+            else:
+                config = DaemonConfig(
+                    DesktopSettings(
+                        str(args.workspace.expanduser().resolve()),
+                        args.port,
+                        args.mode,
+                        args.public_origin,
+                        args.cloudflared,
+                    ),
+                    os.environ.get("KT_MCP_TOKEN") or secrets.token_urlsafe(32),
+                    os.environ.get("TUNNEL_TOKEN", ""),
+                )
+                save_config(config, args.config)
+                print(f"Created private configuration: {args.config}")
+            command = shlex.join(
+                ["kt-mcp", "tui", "--config", str(args.config.expanduser().absolute())]
             )
-            save_config(config, args.config)
-            print(f"Created private configuration: {args.config}")
-            print("Use kt-mcp client-config to display the client credentials.")
+            print(f"Next: {command}")
+            print("Press i to register/start the service, then c for client settings.")
             return 0
         if args.command == "client-config":
             config = load_config(args.config)

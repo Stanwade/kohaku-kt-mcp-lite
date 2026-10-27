@@ -17,6 +17,15 @@ from kt_mcp.server import create_app, serve_stdio
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if (
+        not argv
+        and sys.platform == "linux"
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    ):
+        from kt_mcp.tui import main as tui_main
+
+        return tui_main([])
     if argv and argv[0] in {"init", "daemon", "client-config"}:
         from kt_mcp.daemon import main as daemon_main
 
@@ -34,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
         epilog=(
             "Linux commands: init, daemon, client-config, service, tui. "
             "Use kt-mcp COMMAND --help for details. "
+            "On Linux, no arguments in an interactive terminal opens the TUI. "
+            "Use --transport stdio to force the MCP protocol, including in a terminal. "
             "Upstream: https://github.com/Kohaku-Lab/KohakuTerrarium"
         ),
     )

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 class TerminalSession:
     """Drive the real CLI using prompts, keeping captured credentials out of failures."""
 
-    def __init__(self, config, name, *, cwd, environment):
+    def __init__(self, arguments, *, cwd, environment):
         import fcntl
         import pty
         import struct
@@ -35,16 +35,7 @@ class TerminalSession:
         try:
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 110, 0, 0))
             self.process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "kt_mcp",
-                    "tui",
-                    "--config",
-                    str(config),
-                    "--name",
-                    name,
-                ],
+                [sys.executable, "-m", "kt_mcp", *arguments],
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
@@ -152,12 +143,7 @@ def assert_unregistered(name, environment, *, systemd_available):
         assert status.get("MainPID", "0") in {"", "0"}
 
 
-@pytest.fixture
-def onboarding(tmp_path):
-    workspace = tmp_path / "project with spaces 中文"
-    workspace.mkdir()
-    config = tmp_path / "new configuration" / "config.json"
-    name = "kt-mcp-onboard-" + secrets.token_hex(6)
+def terminal_environment(tmp_path):
     environment = {
         **os.environ,
         "TERM": "xterm-256color",
@@ -166,10 +152,24 @@ def onboarding(tmp_path):
     }
     for key in ("KT_MCP_TOKEN", "TUNNEL_TOKEN", "PYTHONHOME", "PYTHONSTARTUP"):
         environment.pop(key, None)
+    return environment
+
+
+@pytest.fixture
+def onboarding(tmp_path):
+    workspace = tmp_path / "project with spaces 中文"
+    workspace.mkdir()
+    config = tmp_path / "new configuration" / "config.json"
+    name = "kt-mcp-onboard-" + secrets.token_hex(6)
+    environment = terminal_environment(tmp_path)
     status = unit_status(name, environment)
     systemd_available = status is not None
     assert_unregistered(name, environment, systemd_available=systemd_available)
-    terminal = TerminalSession(config, name, cwd=workspace, environment=environment)
+    terminal = TerminalSession(
+        ["tui", "--config", str(config), "--name", name],
+        cwd=workspace,
+        environment=environment,
+    )
     try:
         yield terminal, workspace, config
     finally:
@@ -253,3 +253,65 @@ def test_named_tunnel_secret_is_hidden_in_a_real_terminal(onboarding, tmp_path):
 
     assert set(tmp_path.rglob("*")) == before
     assert not config.exists()
+
+
+def test_interactive_init_preserves_port_option_and_defaults_to_current_directory(
+    tmp_path,
+):
+    workspace = tmp_path / "init project 中文"
+    workspace.mkdir()
+    config = tmp_path / "init configuration" / "config.json"
+    terminal = TerminalSession(
+        ["init", "--config", str(config), "--port", "9876"],
+        cwd=workspace,
+        environment=terminal_environment(tmp_path),
+    )
+    try:
+        terminal.expect(
+            "Current directory where this command was started: " + str(workspace)
+        )
+        terminal.expect("Workspace directory [")
+        terminal.send("\n")
+        terminal.expect("Local HTTP port [9876]: ")
+        terminal.send("\n")
+        terminal.expect("Connection mode (")
+        terminal.send("\n")
+        terminal.expect("Save configuration?")
+        assert not config.exists()
+        assert not config.parent.exists()
+
+        terminal.send("\n")
+        terminal.expect("Private configuration created:")
+        terminal.finish()
+        settings = json.loads(config.read_text(encoding="utf-8"))
+        assert settings["workspace"] == str(workspace.resolve())
+        assert settings["port"] == 9876
+        assert settings["mode"] == "local"
+        assert not config.with_suffix(".status.json").exists()
+        terminal.assert_hidden(settings["token"])
+    finally:
+        terminal.close()
+
+
+def test_bare_terminal_command_enters_setup_and_cancels_without_writes(tmp_path):
+    workspace = tmp_path / "bare command project"
+    workspace.mkdir()
+    environment = terminal_environment(tmp_path)
+    xdg_config = Path(environment["XDG_CONFIG_HOME"])
+    config = xdg_config / "kt-mcp/config.json"
+    before = set(tmp_path.rglob("*"))
+    terminal = TerminalSession([], cwd=workspace, environment=environment)
+    try:
+        terminal.expect(
+            "Current directory where this command was started: " + str(workspace)
+        )
+        terminal.expect("Workspace directory [")
+        assert not config.exists()
+        terminal.send(":q\n")
+        terminal.expect("Setup cancelled; no configuration was saved.")
+        terminal.finish()
+
+        assert not xdg_config.exists()
+        assert set(tmp_path.rglob("*")) == before
+    finally:
+        terminal.close()
