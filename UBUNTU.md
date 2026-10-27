@@ -3,15 +3,46 @@
 Ubuntu 22.04/24.04 的无桌面安装使用 Python wheel 和独立虚拟环境，不需要 Tk、图形会话或 tmux。
 Windows Nuitka EXE 的内嵌 Python 仅适用于 Windows；Linux 使用虚拟环境自己的 Python 执行 MCP 的 `python` 工具。
 
-## 从源码安装
+## 安装
+
+Ubuntu 系统前置条件：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv bash ca-certificates
-python3 -m venv "$HOME/.local/share/kt-mcp/venv"
-"$HOME/.local/share/kt-mcp/venv/bin/python" -m pip install .
-export PATH="$HOME/.local/share/kt-mcp/venv/bin:$PATH"
+sudo apt-get install -y python3 python3-venv bash coreutils ca-certificates
 ```
+
+以普通用户运行安装器。源码仓库中使用：
+
+```bash
+bash scripts/install_linux.sh
+export PATH="$HOME/.local/bin:$PATH"
+kt-mcp tui
+```
+
+在 Linux 发行包解压目录中使用 `bash install.sh`，它会安装包内的 wheel。首次安装需要联网获取 Python 依赖。Python 要求 3.10 或以上，不需要向系统 Python 安装项目依赖。
+
+默认虚拟环境为 `${XDG_DATA_HOME:-$HOME/.local/share}/kt-mcp/venv`，命令链接为 `$HOME/.local/bin/kt-mcp`。安装器先检查依赖、目标环境和命令入口，不会覆盖其他项目的虚拟环境或已有同名命令。它只更新自己标记过的虚拟环境；曾手动创建的环境可继续用该环境的 pip 升级，或选择新的安装前缀。
+
+常用选项：
+
+```bash
+bash scripts/install_linux.sh --prefix "$HOME/apps/kt-mcp" --bin-dir "$HOME/.local/bin"
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-VERSION-py3-none-any.whl
+bash scripts/install_linux.sh --prefix "$HOME/apps/kt-mcp" --no-link
+```
+
+`--python` 可指定 Python 解释器。升级既有环境时，Python 主/小版本必须一致；从 3.10 迁移至 3.12 等情况请使用新的 `--prefix`。安装完成后用 TUI 的首次向导建立配置，或按下面的 CLI 步骤初始化。
+
+升级时使用相同的安装前缀，在安装前停止服务，完成后重新启动，让进程完整加载新版代码：
+
+```bash
+kt-mcp service stop
+bash install.sh
+kt-mcp service start
+```
+
+源码安装时将中间一行换成 `bash scripts/install_linux.sh`；自定义实例或系统级服务沿用对应的 `--name`、`--system` 参数。配置、令牌和工作区继续沿用。
 
 MCP 的 Bash/Python 命令具有服务运行账户的权限。使用能访问目标工作区的普通账户，不要以 root 身份开放 MCP。
 

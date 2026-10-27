@@ -1,5 +1,5 @@
-include LICENSE NOTICE README.md start-gui.cmd
+include LICENSE NOTICE README.md UBUNTU.md start-gui.cmd
 recursive-include examples *.json
 recursive-include tests *.py
-recursive-include scripts *.py
+recursive-include scripts *.py *.sh
 recursive-include packaging *.py
