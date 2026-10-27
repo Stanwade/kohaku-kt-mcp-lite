@@ -137,6 +137,9 @@ class DesktopService:
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                # Permit immediate POSIX service restart after active HTTP requests.
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", settings.port))
             if settings.mode != "local":
                 binary = find_cloudflared(

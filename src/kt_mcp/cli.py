@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -15,9 +16,18 @@ from kt_mcp.server import create_app, serve_stdio
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"init", "daemon", "client-config"}:
+        from kt_mcp.daemon import main as daemon_main
+
+        return daemon_main(argv)
     parser = argparse.ArgumentParser(
         description="Kohaku KT MCP: standalone workspace tools derived from KohakuTerrarium.",
-        epilog="Upstream: https://github.com/Kohaku-Lab/KohakuTerrarium",
+        epilog=(
+            "Headless commands: init, daemon, client-config. "
+            "Use kt-mcp COMMAND --help for details. "
+            "Upstream: https://github.com/Kohaku-Lab/KohakuTerrarium"
+        ),
     )
     parser.add_argument(
         "--version", action="version", version=f"Kohaku KT MCP {__version__}"
