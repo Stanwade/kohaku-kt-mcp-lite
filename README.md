@@ -3,7 +3,7 @@
 KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI 和 Cloudflare Tunnel 自动接入。
 
 Windows 用户可在 [Releases](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases) 下载单文件 EXE，双击运行，无需安装 Python。
-Linux / Ubuntu 的无桌面安装、持久化配置和 systemd 后台服务见 [Ubuntu 指南](UBUNTU.md)。
+Linux / Ubuntu 的无桌面安装、TUI 管理面板、持久化配置和 systemd 后台服务见 [Ubuntu 指南](UBUNTU.md)。
 源码安装、客户端连接和自行打包的方法见下文。
 
 A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).

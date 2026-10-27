@@ -30,6 +30,48 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def quit_tui_in_terminal(path, name):
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 110, 0, 0))
+    process = subprocess.Popen(
+        [sys.executable, "-m", "kt_mcp", "tui", "--config", str(path), "--name", name],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env={**os.environ, "TERM": "xterm-256color", "LC_ALL": "C.UTF-8"},
+        start_new_session=True,
+    )
+    os.close(slave)
+    output = bytearray()
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                try:
+                    output.extend(os.read(master, 65536))
+                except OSError:
+                    break
+                if b"Quit panel" in output:
+                    break
+            if process.poll() is not None:
+                break
+        assert b"Quit panel" in output, output.decode("utf-8", errors="replace")
+        os.write(master, b"q")
+        assert process.wait(timeout=10) == 0
+        return output.decode("utf-8", errors="replace")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+
+
 def wait_ready(manager, path, *, previous_pid=None, timeout=30):
     deadline = time.monotonic() + timeout
     last = {}
@@ -97,6 +139,10 @@ async def test_real_systemd_restart_cleanup_and_independent_lifetime(tmp_path):
         first_pid = await asyncio.to_thread(wait_ready, manager, path)
         assert manager.status()["UnitFileState"] == "enabled"
         assert token not in manager.unit_path.read_text()
+        terminal_output = await asyncio.to_thread(quit_tui_in_terminal, path, name)
+        assert token not in terminal_output
+        assert int(manager.status()["MainPID"]) == first_pid
+        assert manager.status()["ActiveState"] == "active"
 
         url = f"http://127.0.0.1:{port}/mcp/{token}"
         async with (

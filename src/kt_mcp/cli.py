@@ -25,10 +25,14 @@ def main(argv: list[str] | None = None) -> int:
         from kt_mcp.service import main as service_main
 
         return service_main(argv[1:])
+    if argv and argv[0] == "tui":
+        from kt_mcp.tui import main as tui_main
+
+        return tui_main(argv[1:])
     parser = argparse.ArgumentParser(
         description="Kohaku KT MCP: standalone workspace tools derived from KohakuTerrarium.",
         epilog=(
-            "Linux commands: init, daemon, client-config, service. "
+            "Linux commands: init, daemon, client-config, service, tui. "
             "Use kt-mcp COMMAND --help for details. "
             "Upstream: https://github.com/Kohaku-Lab/KohakuTerrarium"
         ),

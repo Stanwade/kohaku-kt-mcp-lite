@@ -356,6 +356,23 @@ class ServiceManager:
         account = _account(False, None)
         _run(["loginctl", "--no-ask-password", "enable-linger", account.pw_name])
 
+    def linger_status(self) -> str:
+        if self.system:
+            return "not-required"
+        return (
+            _run(
+                [
+                    "loginctl",
+                    "--no-ask-password",
+                    "show-user",
+                    str(os.geteuid()),
+                    "--property=Linger",
+                    "--value",
+                ]
+            ).strip()
+            or "unknown"
+        )
+
     def follow_logs(self, lines: int = 80):
         """Explicit interactive follow; finite log queries use logs instead."""
         command = self._journal_arguments(lines) + ["--follow"]

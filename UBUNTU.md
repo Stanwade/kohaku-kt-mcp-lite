@@ -94,6 +94,28 @@ sudo "$HOME/.local/share/kt-mcp/venv/bin/kt-mcp" service status --system
 
 WSL 的 Ubuntu 必须启用 systemd，且 Windows/WSL 虚拟机本身处于运行状态；关闭 WSL 虚拟机后，内部 Linux 服务也会停止。
 
+## TUI 终端管理面板
+
+```bash
+kt-mcp tui
+```
+
+首次运行且配置不存在时，向导会询问工作区、端口和接入模式；固定域名的 Tunnel Token 使用隐藏输入。面板使用 Python 标准库 curses，不需要 Tk 或桌面环境。通过 SSH 使用时需要分配终端，例如 `ssh -t user@host`。
+
+| 按键 | 操作 |
+| --- | --- |
+| `i` | 注册用户服务、启用 linger，并启用/启动服务 |
+| `s` / `x` / `r` | 启动 / 停止 / 重启 |
+| `e` / `d` | 启用 / 取消自启动；不改变当前运行状态 |
+| `g` | 启用用户 linger |
+| `l` | 查看可滚动的日志，遮盖已知令牌 |
+| `c` | 显式显示含访问令牌的客户端 JSON；需要完整原始 JSON 时用 `kt-mcp client-config`，避免屏幕折行影响复制 |
+| `q` | 退出面板，后台服务继续运行 |
+
+面板显示 systemd 状态、PID、重启次数、工作区、接入模式、日志和 linger 状态。普通模式应看到 `Linger: yes` 且自启动状态为 `enabled`，才能确保未登录时仍启动用户服务。最小终端尺寸为 64×18；日志和客户端 JSON 窗口支持方向键、PgUp/PgDn，Enter/Esc/q 返回主面板。
+
+多实例使用与安装相同的 `--name` 和 `--config`。管理已安装的系统级服务时使用 `tui --system --config /absolute/path/config.json`，需要相应权限；系统级首次注册仍通过显式指定 `--run-as` 的 CLI 完成。
+
 ## 无界面运行与客户端配置
 
 ```bash
