@@ -1,4 +1,4 @@
-"""Build a wheel, source distribution, and Ubuntu installer bundle."""
+"""Build Python packages, an Ubuntu bundle, and the online installer asset."""
 
 import argparse
 import ast
@@ -161,6 +161,8 @@ def build_release(output: Path, *, no_isolation: bool = False) -> list[Path]:
         archive = staging / f"{bundle_name}.tar.gz"
         build_bundle(archive, bundle_name, bundle_files)
         artifacts = {path.name: path for path in (wheel, sdist, archive)}
+        # The public bootstrap is distinct from the local installer in the bundle.
+        artifacts["install.sh"] = ROOT / "install.sh"
         release_sums = staging / "SHA256SUMS"
         release_sums.write_text(checksums(artifacts), encoding="ascii", newline="\n")
         output.mkdir(parents=True, exist_ok=True)

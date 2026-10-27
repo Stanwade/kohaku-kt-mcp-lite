@@ -2,7 +2,7 @@
 
 KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI、Linux TUI / systemd 管理和 Cloudflare Tunnel 自动接入。
 
-Linux / Ubuntu 用户可在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 下载安装包，按 [Ubuntu 指南](UBUNTU.md) 安装并运行 `kt-mcp tui`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
+Linux / Ubuntu 用户可用下方在线命令安装，或在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 手动下载安装包。首次使用按 [Ubuntu 指南](UBUNTU.md) 进入项目目录并运行 `kt-mcp`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
 Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.2.1 提供改进后的终端引导、Linux 安装包、通用 Python wheel 和源码包。
 源码安装、客户端连接和自行打包的方法见下文。
 
@@ -12,18 +12,38 @@ No KohakuTerrarium installation, LLM provider, API key, Agent, or Studio is requ
 
 ## Ubuntu quick start
 
+在普通用户的终端中安装。新的 Ubuntu 环境先准备依赖：
+
 ```bash
-sudo apt-get install -y python3 python3-venv bash coreutils ca-certificates
-# In a source checkout; for an extracted release bundle, use bash install.sh.
-bash scripts/install_linux.sh
-export PATH="$HOME/.local/bin:$PATH"
+sudo apt-get update
+sudo apt-get install -y curl python3 python3-venv bash coreutils ca-certificates
 ```
 
-安装后先进入希望 MCP 访问的项目目录，再运行 `kt-mcp`（或 `kt-mcp tui`）。首次向导会显示当前目录：Enter 使用默认目录，也可输入其他已有路径，输入错误可重试，保存前可返回修改或取消。
+一条命令安装最新正式版：
+
+```bash
+curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
+```
+
+默认命令链接位于 `$HOME/.local/bin/kt-mcp`。如果安装器打印了 `export PATH=...` 提示，在当前终端执行它。默认目录可以使用下面的命令；将 `/path/to/your/project` 换成希望 MCP 访问的已有项目目录：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd -- /path/to/your/project
+kt-mcp
+```
+
+安装管道只完成软件安装，工作区在后续首次启动向导中选择。向导会显示启动命令时所在的目录：Enter 使用它，也可输入其他已有路径，输入错误可重试，保存前可返回修改或取消。已有配置会继续沿用保存的工作区。
 
 首次 TUI 向导建立配置后，按 `i` 注册并启动用户服务、开启 linger；按 `q` 退出面板。
-只创建配置可以运行 `kt-mcp init`，它在交互终端进入同一套向导。脚本中明确指定 `kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
-配置、固定域名、系统级 unit、升级及验证说明见 [UBUNTU.md](UBUNTU.md)。
+只创建配置可以运行 `kt-mcp init`。脚本中明确指定 `kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
+
+其他安装方式：
+
+- 已有源码 checkout：在仓库根目录执行 `bash scripts/install_linux.sh`。
+- 手动发行包：校验并解压后，在包目录执行 `bash ./install.sh`。仓库根目录的同名 `install.sh` 则是在线下载入口。
+
+固定版本、自定义安装目录、自动化调用的外层 `pipefail`、升级及服务配置见 [Ubuntu 指南](UBUNTU.md)。
 
 ## Quick start
 

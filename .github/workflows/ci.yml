@@ -45,6 +45,7 @@ jobs:
           python -m black --check src tests scripts/build_linux.py scripts/verify_linux.py
           python -m ruff check src tests scripts/build_linux.py scripts/verify_linux.py
           bash -n scripts/install_linux.sh
+          bash -n install.sh
       - name: Unit and MCP integration tests
         run: python -m pytest -q
 
@@ -75,7 +76,7 @@ jobs:
       - name: System service runs as the requested ordinary account
         run: |
           sudo env KT_MCP_TEST_SYSTEMD=1 KT_MCP_SYSTEM_TEST_USER="$(id -un)" "$(command -v python)" -m pytest tests/integration/test_systemd_lifecycle.py -q -k ordinary_account
-      - name: Build wheel, source archive, Linux bundle, and checksums
+      - name: Build packages, online installer, and checksums
         run: python scripts/build_linux.py
       - name: Verify the installed Linux release and all MCP tools
         run: |

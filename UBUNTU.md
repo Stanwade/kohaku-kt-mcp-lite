@@ -5,45 +5,135 @@ Windows Nuitka EXE 的内嵌 Python 仅适用于 Windows；Linux 使用虚拟环
 
 ## 安装
 
-Ubuntu 系统前置条件：
+### Ubuntu 前置依赖
+
+在新的 Ubuntu 环境中执行：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv bash coreutils ca-certificates
+sudo apt-get install -y curl python3 python3-venv bash coreutils ca-certificates
 ```
 
-以普通用户运行安装器。源码仓库中使用：
+后面的安装命令以普通用户执行，不加 `sudo`。Python 要求 3.10 或以上，首次安装需要联网获取 Python 依赖。
+
+### 在线安装
+
+在终端运行：
 
 ```bash
-bash scripts/install_linux.sh
+curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
+```
+
+在线脚本从本仓库的最新正式 Release 读取清单，把本次下载固定到一个版本，核对 Linux 发行包和包内文件的 SHA256 后执行包内安装器。安装过程使用独立虚拟环境。
+
+默认安装前缀为 `$XDG_DATA_HOME/kt-mcp`；未设置 `XDG_DATA_HOME` 时使用 `$HOME/.local/share/kt-mcp`。虚拟环境位于前缀下的 `venv`，默认命令链接为 `$HOME/.local/bin/kt-mcp`。安装器只更新自己标记过的虚拟环境，并检查已有同名命令；不会覆盖其他项目的环境或命令入口。
+
+创建命令链接时，如果命令目录尚未加入 `PATH`，在线安装器会打印对应的 `export PATH=...` 命令。在当前终端执行该提示后即可使用 `kt-mcp`；安装器不修改 shell 配置文件。默认命令目录的写法是：
+
+```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-安装完成后，先切换到希望 MCP 访问的项目目录，再运行 `kt-mcp` 或 `kt-mcp tui`。首次向导会明确展示该目录作为默认工作区；可以直接回车使用，也可输入其他已有目录。安装目录和工作目录可以完全不同。
+### 安装后的首次启动
 
-在 Linux 发行包解压目录中使用 `bash install.sh`，它会安装包内的 wheel。首次安装需要联网获取 Python 依赖。Python 要求 3.10 或以上，不需要向系统 Python 安装项目依赖。
-
-默认虚拟环境为 `${XDG_DATA_HOME:-$HOME/.local/share}/kt-mcp/venv`，命令链接为 `$HOME/.local/bin/kt-mcp`。安装器先检查依赖、目标环境和命令入口，不会覆盖其他项目的虚拟环境或已有同名命令。它只更新自己标记过的虚拟环境；曾手动创建的环境可继续用该环境的 pip 升级，或选择新的安装前缀。
-
-常用选项：
+安装管道不询问工作区或自动打开 TUI。安装完成后，先进入希望 MCP 访问的已有项目目录，再单独启动：
 
 ```bash
-bash scripts/install_linux.sh --prefix "$HOME/apps/kt-mcp" --bin-dir "$HOME/.local/bin"
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-VERSION-py3-none-any.whl
-bash scripts/install_linux.sh --prefix "$HOME/apps/kt-mcp" --no-link
+cd -- /path/to/your/project
+kt-mcp
 ```
 
-`--python` 可指定 Python 解释器。升级既有环境时，Python 主/小版本必须一致；从 3.10 迁移至 3.12 等情况请使用新的 `--prefix`。安装完成后用 TUI 的首次向导建立配置，或按下面的 CLI 步骤初始化。
+将示例路径替换为实际项目目录。也可显式运行 `kt-mcp tui`。首次向导会显示启动时的当前目录作为默认工作区，Enter 使用它，也可输入其他已有目录；保存前可以检查和修改。安装目录和 MCP 工作目录可以完全不同。已有配置继续使用其保存的工作区，切换 shell 目录不会改变已配置服务的工作区。
 
-升级时使用相同的安装前缀，在安装前停止服务，完成后重新启动，让进程完整加载新版代码：
+### 在线安装选项与自动化
+
+给在线安装器传参时使用 `bash -s --`，例如：
 
 ```bash
-kt-mcp service stop
-bash install.sh
-kt-mcp service start
+curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
+  bash -s -- --version 0.2.1 \
+    --prefix "$HOME/apps/kt-mcp" \
+    --bin-dir "$HOME/.local/bin" \
+    --python /usr/bin/python3
 ```
 
-源码安装时将中间一行换成 `bash scripts/install_linux.sh`；自定义实例或系统级服务沿用对应的 `--name`、`--system` 参数。配置、令牌和工作区继续沿用。
+| 选项 | 行为 |
+| --- | --- |
+| `--version VERSION` | 安装指定的 `X.Y.Z` 或 `vX.Y.Z`；省略时选择最新正式 Release |
+| `--prefix DIR` | 指定安装前缀，虚拟环境位于 `DIR/venv` |
+| `--bin-dir DIR` | 指定 `kt-mcp` 命令链接所在目录 |
+| `--python EXEC` | 指定 Python 3.10+ 的可执行路径或 PATH 中的名称；默认 `python3` |
+| `--no-link` | 不创建命令链接；使用安装器打印的虚拟环境内绝对命令路径 |
+| `--help` | 查看在线安装器帮助 |
+
+`--prefix` 和 `--bin-dir` 的相对路径以运行在线安装命令时的目录为基准。选择 `--no-link` 后，例如安装前缀为 `$HOME/apps/kt-mcp`，可运行 `"$HOME/apps/kt-mcp/venv/bin/kt-mcp" tui`。
+
+在自动化脚本中，启用**外层管道的 `pipefail`**，让下载入口脚本的第一个 `curl` 失败时，整个调用也返回非零：
+
+```bash
+(
+  set -o pipefail
+  curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
+    bash -s -- --version 0.2.1
+)
+```
+
+`pipefail` 设置在包含整条管道的 shell 中；仅给接收脚本的那个 `bash` 添加该选项，不能捕获前一个 `curl` 的失败。
+
+### 手动下载发行包
+
+从同一个 Release 下载 `kt-mcp-0.2.1-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+
+```bash
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
+
+```bash
+tar -xzf kt-mcp-0.2.1-linux.tar.gz
+cd kt-mcp-0.2.1-linux
+bash ./install.sh
+```
+
+这里的 `install.sh` 安装同目录的 wheel，不再下载 Linux 发行包；Python 依赖仍需联网获取。安装后按前面的首次启动步骤进入实际项目目录。
+
+### 从源码仓库安装
+
+在已有源码 checkout 的仓库根目录执行：
+
+```bash
+bash scripts/install_linux.sh
+```
+
+`scripts/install_linux.sh` 安装当前 checkout。仓库根目录的 `install.sh` 是在线下载入口；发行包目录里的 `install.sh` 是本地 wheel 安装器，注意命令所在目录。
+
+本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
+
+```bash
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.2.1-py3-none-any.whl
+```
+
+`--source` 只用于本地安装器，在线入口不接受它。
+
+### 升级已有安装
+
+**已经注册并运行服务时**，使用原来的安装前缀，先停止服务、更新软件，再启动，让进程完整加载新版代码。默认用户服务和默认安装位置的在线升级示例：
+
+```bash
+(
+  set -euo pipefail
+  kt-mcp service stop
+  curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
+  kt-mcp service start
+)
+```
+
+只有前一步成功才执行下一步。使用自定义安装位置或解释器时，在中间命令的 `bash -s --` 后传入与原安装一致的 `--prefix`、`--bin-dir`、`--python` 等选项。没有命令链接时，用安装器打印的绝对路径替代 `kt-mcp`。
+
+手动安装包升级时，在新包解压目录使用 `bash ./install.sh` 作为中间的安装命令；源码安装则在仓库根目录使用 `bash scripts/install_linux.sh`。自定义实例的启停沿用 `--name`，系统级服务沿用 `--system` 和所需管理权限；软件安装仍以服务运行的普通账户执行。配置、访问令牌和工作区继续沿用。
+
+升级既有虚拟环境时，Python 主/小版本必须一致；从 3.10 迁移至 3.12 等情况请使用新的 `--prefix`。手动创建、未由安装器标记的环境，可继续用该环境的 pip 升级，或选择新的安装前缀。
 
 MCP 的 Bash/Python 命令具有服务运行账户的权限。使用能访问目标工作区的普通账户，不要以 root 身份开放 MCP。
 
@@ -191,7 +281,7 @@ python3 -m venv .venv
 .venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.2.1-linux.tar.gz --systemd
 ```
 
-构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包和外层 `SHA256SUMS`；安装包内另有校验清单。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。
+构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。
 
 验收会在临时目录重新安装 wheel，使用安装后的命令创建临时工作区，调用全部 12 个 MCP 工具，并检查 Python 工具来自新虚拟环境。`--systemd` 额外验证临时用户 unit、TUI 退出后后台继续运行；结束时移除临时服务和安装目录。当前用户必须能访问 `systemctl --user`。不带 `--systemd` 时只运行独立 daemon 进行协议验收。报告默认写入 `dist/linux-smoke.json`，可用 `--report` 修改。
 

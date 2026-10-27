@@ -1,4 +1,4 @@
-include LICENSE NOTICE README.md UBUNTU.md RELEASE_NOTES.md start-gui.cmd
+include LICENSE NOTICE README.md UBUNTU.md RELEASE_NOTES.md install.sh start-gui.cmd
 recursive-include examples *.json
 recursive-include tests *.py
 recursive-include scripts *.py *.sh
