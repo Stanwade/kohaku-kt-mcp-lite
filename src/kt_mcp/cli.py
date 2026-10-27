@@ -21,10 +21,14 @@ def main(argv: list[str] | None = None) -> int:
         from kt_mcp.daemon import main as daemon_main
 
         return daemon_main(argv)
+    if argv and argv[0] == "service":
+        from kt_mcp.service import main as service_main
+
+        return service_main(argv[1:])
     parser = argparse.ArgumentParser(
         description="Kohaku KT MCP: standalone workspace tools derived from KohakuTerrarium.",
         epilog=(
-            "Headless commands: init, daemon, client-config. "
+            "Linux commands: init, daemon, client-config, service. "
             "Use kt-mcp COMMAND --help for details. "
             "Upstream: https://github.com/Kohaku-Lab/KohakuTerrarium"
         ),

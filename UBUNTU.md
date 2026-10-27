@@ -38,6 +38,62 @@ unset TUNNEL_TOKEN
 
 以上初始化方式任选一种。编辑已有配置时保留 `version: 1` 和访问令牌，并保持 `chmod 600`。`KT_MCP_TOKEN`、`TUNNEL_TOKEN` 环境变量可覆盖文件中的令牌；systemd 不会自动继承交互 shell 的环境变量。
 
+## 注册 systemd 后台服务
+
+推荐普通用户服务：
+
+```bash
+kt-mcp service install --now --linger
+kt-mcp service status
+kt-mcp client-config
+```
+
+`--now` 注册并启用、启动服务。`--linger` 请求 systemd 在该用户未登录时也启动用户管理器，使服务在退出 SSH 后继续运行，并随系统启动。若系统策略拒绝普通用户启用 linger，执行：
+
+```bash
+sudo loginctl enable-linger "$(id -un)"
+kt-mcp service install --now
+```
+
+检查是否生效：
+
+```bash
+loginctl show-user "$(id -un)" --property=Linger
+systemctl --user is-enabled kt-mcp.service
+systemctl --user status kt-mcp.service
+```
+
+分别应看到 `Linger=yes`、`enabled` 和活动状态。systemd 的 active 表示进程已启动；Cloudflare 初次下载及连接还可能进行中，通过日志确认 MCP 初始化和连接器已就绪。
+
+常用管理命令：
+
+| 命令 | 行为 |
+| --- | --- |
+| `kt-mcp service start` | 启动 |
+| `kt-mcp service stop` | 停止并清理本服务的任务进程 |
+| `kt-mcp service restart` | 重启并重新读取配置 |
+| `kt-mcp service enable --now` | 启用自启动并立即启动 |
+| `kt-mcp service disable --now` | 取消自启动并立即停止 |
+| `kt-mcp service logs --follow` | 持续查看 journal 日志 |
+| `kt-mcp service uninstall` | 停止、取消自启动并移除本项目 unit；保留配置和工作区 |
+
+用户 unit 位于 `~/.config/systemd/user/kt-mcp.service`（遵循 `XDG_CONFIG_HOME`）。需要多个实例时，在所有管理命令中统一加 `--name kt-mcp-dev` 等 ASCII 名称，并为每个实例选择不同的配置文件和端口。重新生成已有不同内容的托管 unit 使用 `install --replace`；不会覆盖未标记为本项目生成的 unit。更新 unit 或软件后，显式运行 `kt-mcp service restart` 让运行中的进程加载新版本；`enable --now` 不会重启已在运行的服务。
+
+也支持与传统服务器软件相同的系统级 unit。先以普通账户完成安装和初始化，再执行：
+
+```bash
+sudo "$HOME/.local/share/kt-mcp/venv/bin/kt-mcp" service install \
+  --system --run-as "$(id -un)" \
+  --config "$HOME/.config/kt-mcp/config.json" --now
+sudo "$HOME/.local/share/kt-mcp/venv/bin/kt-mcp" service status --system
+```
+
+系统级 unit 写入 `/etc/systemd/system/kt-mcp.service`，使用指定普通用户运行，不需要 linger。配置应归该运行用户所有、权限为 `0600`，该用户须能访问安装目录和工作区，并能在配置所在目录写入运行状态；系统模式的管理命令都加 `--system`。不要同时启动同端口的系统级和用户级实例。
+
+服务失败时由 systemd 重启，正常 stop 不重启。unit 使用 `KillMode=control-group` 清理 MCP 任务后代、`TimeoutStopSec=30` 限定退出时间，并设置 `NoNewPrivileges=true` 禁止工具通过 setuid/sudo 提升权限。服务不依赖 TUI、终端或 tmux。
+
+WSL 的 Ubuntu 必须启用 systemd，且 Windows/WSL 虚拟机本身处于运行状态；关闭 WSL 虚拟机后，内部 Linux 服务也会停止。
+
 ## 无界面运行与客户端配置
 
 ```bash

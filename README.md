@@ -3,6 +3,7 @@
 KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI 和 Cloudflare Tunnel 自动接入。
 
 Windows 用户可在 [Releases](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases) 下载单文件 EXE，双击运行，无需安装 Python。
+Linux / Ubuntu 的无桌面安装、持久化配置和 systemd 后台服务见 [Ubuntu 指南](UBUNTU.md)。
 源码安装、客户端连接和自行打包的方法见下文。
 
 A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
@@ -195,9 +196,11 @@ instance. External writers can still race between the final content check and th
 - Up to 8 concurrent commands and 64 retained jobs. Oldest completed jobs are evicted first.
   Shutdown cancels owned commands; jobs, file read state, and results are lost on restart.
   Clients share that state. Do not retry a side effect automatically after losing its reply.
-- No workspace registry, persistent sessions, Agent/subagent delegation, plugins, background
-  daemon management, ngrok supervision, or outbound MCP client manager in this MVP.
+- No workspace registry, persistent sessions, Agent/subagent delegation, plugins,
+  ngrok supervision, or outbound MCP client manager in this MVP.
   The desktop GUI owns one HTTP server and an optional Cloudflare connector while its window is open.
+  Linux can instead run the headless daemon under a user or system systemd unit; terminal sessions
+  do not own that service. See [Ubuntu service management](UBUNTU.md).
 
 ## Extraction map
 
