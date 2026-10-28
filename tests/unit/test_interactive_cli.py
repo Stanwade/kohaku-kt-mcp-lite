@@ -30,6 +30,9 @@ def isolated_environment(tmp_path, monkeypatch):
 
 @pytest.fixture
 def entrypoints(monkeypatch):
+    from kt_mcp import runtime as runtime_module
+    from kt_mcp import server as server_module
+
     calls = SimpleNamespace(tui=[], runtimes=[], stdio=[])
 
     def open_tui(arguments):
@@ -45,8 +48,9 @@ def entrypoints(monkeypatch):
         calls.stdio.append(runtime)
 
     monkeypatch.setattr(tui, "main", open_tui)
-    monkeypatch.setattr(cli, "Runtime", make_runtime)
-    monkeypatch.setattr(cli, "serve_stdio", serve_protocol)
+    # The CLI imports protocol dependencies lazily inside main().
+    monkeypatch.setattr(runtime_module, "Runtime", make_runtime)
+    monkeypatch.setattr(server_module, "serve_stdio", serve_protocol)
     return calls
 
 
