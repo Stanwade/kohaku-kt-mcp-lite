@@ -122,13 +122,16 @@ def overview(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tui, "ServiceManager", manager)
 
-    def control(selected, path, action):
+    def control(selected, path, action, **options):
         if action == "start" and selected.status_data["LoadState"] == "not-found":
             selected.install(path)
         selected.control(action)
         return selected.status()
 
     monkeypatch.setattr(tui, "control_service", control)
+    from kt_mcp import operations
+
+    monkeypatch.setattr(operations, "control_service", control)
     controller = module.InstanceManagerController()
     controller.refresh()
     return SimpleNamespace(

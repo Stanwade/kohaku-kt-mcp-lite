@@ -451,20 +451,65 @@ def verify_tui(cli, config, name, *, cwd, environment, url):
             os.close(slave)
 
 
-def verify_native_creation(cli, *, cwd, environment):
-    """Create and delete through the installed launcher, without an editable package."""
+def verify_native_creation(
+    cli, *, cwd, environment, start_now=False, interpreter=None, version=None
+):
+    """Exercise native creation and its optional Start through the installed launcher."""
     import fcntl
     import pty
     import termios
 
     name = "kt-mcp-wheel-" + uuid.uuid4().hex[:10]
-    workspace = cwd / "native workspace 中文"
+    workspace = cwd / (
+        "native start workspace 中文" if start_now else "native workspace 中文"
+    )
     workspace.mkdir()
     marker = workspace / "keep-project.txt"
     marker.write_text("Project files survive instance deletion.\n", encoding="utf-8")
-    config_home = cwd / "native-tui-configuration"
+    config_home = (
+        Path(environment.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+        .expanduser()
+        .absolute()
+        if start_now
+        else cwd / "native-tui-configuration"
+    )
     target = config_home / "kt-mcp/instances" / (name + ".json")
     port = available_port()
+    unit_path = None
+    owned_configuration = None
+    startup_report = None
+    if start_now:
+        require(
+            interpreter is not None and version,
+            "installed Start needs its interpreter and version",
+        )
+        require(
+            not target.exists() and not target.is_symlink(),
+            "temporary startup configuration already exists",
+        )
+        information = json.loads(
+            command(
+                [
+                    interpreter,
+                    "-c",
+                    (
+                        "import json, sys; from kt_mcp.service import ServiceManager; "
+                        "manager = ServiceManager(sys.argv[1]); "
+                        "print(json.dumps({'unit': str(manager.unit_path), 'status': manager.status()}))"
+                    ),
+                    name,
+                ],
+                cwd=cwd,
+                environment=environment,
+            )
+        )
+        unit_path = Path(information["unit"])
+        require(
+            not unit_path.exists()
+            and not unit_path.is_symlink()
+            and information["status"].get("LoadState") == "not-found",
+            "temporary startup unit already exists or is loaded",
+        )
     terminal_environment = {
         **environment,
         "TERM": "xterm-256color",
@@ -476,6 +521,28 @@ def verify_native_creation(cli, *, cwd, environment):
     process = None
     captured = bytearray()
     position = 0
+
+    def verified_service_status():
+        return json.loads(
+            command(
+                [
+                    interpreter,
+                    "-c",
+                    (
+                        "import json, sys; from pathlib import Path; "
+                        "from kt_mcp.managed_service import inspect_service; "
+                        "binding = inspect_service(sys.argv[1], False, "
+                        "expected_python=sys.executable, expected_config=Path(sys.argv[2])); "
+                        "assert binding is not None; print(json.dumps(binding.status))"
+                    ),
+                    name,
+                    target,
+                ],
+                cwd=cwd,
+                environment=terminal_environment,
+            )
+        )
+
     try:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 64, 0, 0))
         process = subprocess.Popen(
@@ -543,10 +610,7 @@ def verify_native_creation(cli, *, cwd, environment):
         answer("Mode [", "local")
         answer("Save?")
         expect("Start instance now?")
-        # No is the default; no service should be installed by this operation.
         expect("No, return")
-        os.write(master, b"\n")
-        expect("Selected: " + name)
         saved = json.loads(target.read_text(encoding="utf-8"))
         require(
             saved["workspace"] == str(workspace)
@@ -559,6 +623,57 @@ def verify_native_creation(cli, *, cwd, environment):
             and target.stat().st_mode & 0o777 == 0o600,
             "installed native creation did not save a private independent token",
         )
+        owned_configuration = target.read_bytes()
+        if start_now:
+            # Start the search after everything already received from confirmation.
+            # The progress title must be newly drawn after Yes, and the selected
+            # row must then be drawn after that progress view has completed.
+            position = len(
+                re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", captured)
+            )
+            os.write(master, b"j\n")
+            expect("Starting instance")
+            expect("Selected: " + name)
+            before = verified_service_status()
+            require(
+                before.get("ActiveState") == "active"
+                and int(before.get("MainPID", "0")) > 0,
+                "installed Yes-start returned without an active service",
+            )
+            require(
+                before.get("UnitFileState") != "enabled",
+                "installed Yes-start enabled automatic startup",
+            )
+            url = f"http://127.0.0.1:{port}/mcp/{saved['token']}"
+            asyncio.run(verify_connection(url, version))
+            native()
+            os.write(master, b"q")
+            require(
+                process.wait(timeout=10) == 0,
+                "installed Yes-start TUI did not return to an interactive overview",
+            )
+            after = verified_service_status()
+            require(
+                after.get("ActiveState") == "active"
+                and after.get("MainPID") == before["MainPID"],
+                "closing the installed Yes-start TUI changed its service",
+            )
+            asyncio.run(verify_connection(url, version))
+            startup_report = {
+                "native_curses": True,
+                "terminal": "64x18",
+                "start_now": True,
+                "returned_to_overview": True,
+                "service_active": True,
+                "mcp_verified": True,
+                "exit_preserves_service": True,
+                "automatic_startup_unchanged": True,
+                "cleanup": "pending",
+            }
+            return startup_report
+        # No is the default; no service should be installed by this operation.
+        os.write(master, b"\n")
+        expect("Selected: " + name)
         require(
             not (config_home / "systemd/user" / (name + ".service")).exists(),
             "installed native creation registered a service after declining Start",
@@ -650,6 +765,40 @@ def verify_native_creation(cli, *, cwd, environment):
         os.close(master)
         if slave is not None:
             os.close(slave)
+        if start_now and (
+            target.exists()
+            or target.is_symlink()
+            or unit_path.exists()
+            or unit_path.is_symlink()
+        ):
+            require(
+                owned_configuration is not None
+                and not target.is_symlink()
+                and target.read_bytes() == owned_configuration,
+                "startup cleanup could not confirm its saved configuration",
+            )
+            if unit_path.exists() or unit_path.is_symlink():
+                # The installed package verifies owner, interpreter, configuration
+                # and generated unit contents before this test removes its unit.
+                verified_service_status()
+            command(
+                [cli, "instance", "delete", name, "--yes"],
+                cwd=cwd,
+                environment=terminal_environment,
+            )
+            require(
+                not target.exists()
+                and not target.with_suffix(".status.json").exists()
+                and not unit_path.exists(),
+                "installed startup resources remained after cleanup",
+            )
+            require(
+                marker.read_text(encoding="utf-8")
+                == "Project files survive instance deletion.\n",
+                "installed startup cleanup changed workspace files",
+            )
+        if startup_report is not None:
+            startup_report["cleanup"] = "passed"
 
 
 def verify(arguments, report, sensitive):
@@ -806,6 +955,15 @@ def verify(arguments, report, sensitive):
                     report["tui_native_creation"] = verify_native_creation(
                         cli, cwd=root, environment=environment
                     )
+                    report["stage"] = "installed native Yes-start workflow"
+                    report["tui_native_start"] = verify_native_creation(
+                        cli,
+                        cwd=root,
+                        environment=environment,
+                        start_now=True,
+                        interpreter=interpreter,
+                        version=version,
+                    )
                     after = service_status()
                     require(
                         after["ActiveState"] == "active"
@@ -891,6 +1049,7 @@ def main(argv=None):
         "installed_venv_worker": False,
         "tui": "not requested",
         "tui_native_creation": "not requested",
+        "tui_native_start": "not requested",
         "cleanup": "not started",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }

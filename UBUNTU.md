@@ -51,7 +51,7 @@ kt-mcp
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-  bash -s -- --version 0.3.2 \
+  bash -s -- --version 0.3.3 \
     --prefix "$HOME/apps/kt-mcp" \
     --bin-dir "$HOME/.local/bin" \
     --python /usr/bin/python3
@@ -76,7 +76,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 (
   set -o pipefail
   curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-    bash -s -- --version 0.3.2
+    bash -s -- --version 0.3.3
 )
 ```
 
@@ -84,7 +84,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 
 ### 手动下载发行包
 
-从同一个 Release 下载 `kt-mcp-0.3.2-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+从同一个 Release 下载 `kt-mcp-0.3.3-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
@@ -93,8 +93,8 @@ sha256sum --ignore-missing -c SHA256SUMS
 确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
 
 ```bash
-tar -xzf kt-mcp-0.3.2-linux.tar.gz
-cd kt-mcp-0.3.2-linux
+tar -xzf kt-mcp-0.3.3-linux.tar.gz
+cd kt-mcp-0.3.3-linux
 bash ./install.sh
 ```
 
@@ -113,7 +113,7 @@ bash scripts/install_linux.sh
 本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
 
 ```bash
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.2-py3-none-any.whl
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.3-py3-none-any.whl
 ```
 
 `--source` 只用于本地安装器，在线入口不接受它。
@@ -125,7 +125,7 @@ v0.3.1 起，可直接使用 TUI 的 Actions → Software updates。命令行入
 ```bash
 kt-mcp update
 kt-mcp update --check                  # 只检查，不安装、不暂停服务
-kt-mcp update --version 0.3.2           # 指定正式版；不支持降级
+kt-mcp update --version 0.3.3           # 指定正式版；不支持降级
 kt-mcp update --name kt-mcp-dev         # 选择要恢复运行的用户实例
 ```
 
@@ -255,6 +255,8 @@ kt-mcp tui
 
 向导逐项检查工作区、端口和接入模式，输入有误会说明原因并让你重试。输入 `:back` 返回上一步并保留已填内容，`:q`、Ctrl+C 或 Ctrl+D 取消。全部输入在原生 curses 表单内完成，凭据使用隐藏输入，Esc 取消、Ctrl+U 清空当前字段。新建先询问实例名，留空按最终工作区自动命名。最后显示绝对路径、端口、接入方式及配置位置，Enter 保存；`edit` 从工作区开始修改，`advanced` 配置 cloudflared 路径和文件访问范围。保存冲突会显示原因并保留已填内容。保存后可选择 Start now，默认为 No。确认保存前不会写配置，首次初始化不会覆盖已有配置。固定域名的 Tunnel Token 使用隐藏输入，摘要不显示令牌。
 
+新建保存后选择 Yes 启动，或通过快捷键与 Actions 启停实例时，界面显示当前阶段和等待时间。启动、重启期间按 `q`、Esc 或 Ctrl+C 结束就绪等待并返回管理界面，服务继续启动；可在列表查看状态和日志。就绪检查完成后自动返回原界面。
+
 向导和面板使用颜色与粗体突出提示、默认值、地址和状态。无色终端自动降级；使用 `NO_COLOR=1 kt-mcp` 可关闭颜色，保留终端支持的粗体。面板使用 Python 标准库 curses，不需要 Tk 或桌面环境；通过 SSH 使用时需要分配终端，例如 `ssh -t user@host`。
 
 | 按键 | 操作 |
@@ -348,7 +350,7 @@ kt-mcp client-config
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python scripts/build_linux.py
-.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.2-linux.tar.gz --systemd
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.3-linux.tar.gz --systemd
 ```
 
 构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。

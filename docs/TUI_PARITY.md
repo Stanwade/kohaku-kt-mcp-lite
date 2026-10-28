@@ -89,6 +89,13 @@ installed unit; instance/TUI Start already knows a saved instance configuration
 and can register it. This prevents an unknown service name from silently using
 the default configuration.
 
+New-instance Yes Start, lifecycle shortcuts and Actions use the same progress
+view. The view shows the current phase and elapsed time while continuing to
+process terminal input. During Start or Restart, q, Esc or Ctrl+C ends readiness
+waiting and returns to the manager; the confirmed service action still completes
+and the service continues starting. Completed readiness checks return to the
+original screen. Stop keeps the progress view responsive until its command ends.
+
 Start, automatic startup and user linger are separate operations. Start makes
 the selected instance run now. Automatic startup sets its systemd enablement.
 User linger affects the login account's user service manager. Merely creating,

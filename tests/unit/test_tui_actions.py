@@ -200,7 +200,7 @@ def test_actions_control_only_the_selected_configuration(monkeypatch, panel, act
     menu_answers(monkeypatch, [action])
     calls = []
 
-    def control(manager, path, selected_action):
+    def control(manager, path, selected_action, **options):
         calls.append((manager, path, selected_action))
         return {"ActiveState": "active", "MainPID": "123"}
 
@@ -250,7 +250,7 @@ def test_action_errors_return_to_panel_without_showing_credentials(
 ):
     menu_answers(monkeypatch, ["start"])
 
-    def failure(*args):
+    def failure(*args, **kwargs):
         raise ValueError("Endpoint failed: " + panel.token + " " + panel.tunnel_token)
 
     monkeypatch.setattr(actions.operations, "control_service", failure)

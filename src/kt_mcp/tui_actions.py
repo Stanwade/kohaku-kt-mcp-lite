@@ -767,10 +767,9 @@ def actions_menu(screen, panel=None, *, selected=None):
                 str(Path.home() / "kt-mcp-instances.json"),
             )
         elif choice in {"start", "stop", "restart"}:
-            panel.status = operations.control_service(
-                panel.manager, panel.config_path, choice
-            )
-            panel.note = f"{choice}: completed."
+            from kt_mcp.tui_service import run_action
+
+            run_action(screen, panel, choice)
         elif choice == "configure":
             tui._configure(screen, panel)
         elif choice == "install":

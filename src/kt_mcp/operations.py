@@ -21,12 +21,16 @@ def bound_service(manager, config_path):
     )
 
 
-def control_service(manager, config_path, action):
+def control_service(manager, config_path, action, *, on_progress=None, cancel=None):
     """Register on first start, without implicitly enabling boot or user linger."""
     if action not in {"start", "stop", "restart"}:
         raise ValueError("Unsupported instance lifecycle action.")
+    if on_progress is not None:
+        on_progress("Checking the instance service...")
     path = Path(config_path)
     if action == "start" and manager.status().get("LoadState") == "not-found":
+        if on_progress is not None:
+            on_progress("Registering the instance service...")
         manager.install(path)
     binding = bound_service(manager, path)
     if binding is None:
@@ -41,9 +45,18 @@ def control_service(manager, config_path, action):
             not in {"active", "activating", "deactivating", "reloading"},
         )
     if action in {"stop", "restart"}:
+        if on_progress is not None:
+            on_progress("Stopping the instance...")
         managed_service.stop_service(binding)
     if action in {"start", "restart"}:
-        result = managed_service.start_service(binding)
+        if on_progress is not None:
+            on_progress("Starting the instance...")
+        options = {}
+        if on_progress is not None:
+            options["on_progress"] = on_progress
+        if cancel is not None:
+            options["cancel"] = cancel
+        result = managed_service.start_service(binding, **options)
         return result if isinstance(result, dict) else manager.status()
     return manager.status()
 

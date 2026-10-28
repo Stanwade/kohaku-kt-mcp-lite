@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -40,6 +41,10 @@ _WORD = re.compile(r'"((?:[^"\\\x00-\x1f\x7f]|\\["\\])*)"')
 
 class ManagedServiceError(RuntimeError):
     """A binding cannot safely be inspected, controlled, or restored."""
+
+
+class StartupWaitCancelled(ManagedServiceError):
+    """The caller ended readiness waiting after issuing the start request."""
 
 
 @dataclass(frozen=True)
@@ -677,48 +682,104 @@ def _initialize(port: int, path: str, timeout: float) -> str:
 
 
 def wait_ready(
-    binding: BoundService, *, timeout=60, expected_version: str | None = None
+    binding: BoundService,
+    *,
+    timeout=60,
+    expected_version: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> dict[str, str]:
-    """Require matching startup PID and a successful local MCP initialize."""
+    """Require matching startup PID and a successful local MCP initialize.
+
+    Cancellation ends only this read-only wait. The start request and service
+    lifecycle remain independent of the caller's readiness view.
+    """
     deadline = _deadline(timeout)
+    last_progress = None
+
+    def check_cancelled():
+        if cancel is not None and cancel():
+            raise StartupWaitCancelled(
+                "Startup wait cancelled; check the instance status."
+            )
+
+    def report(message):
+        nonlocal last_progress
+        if on_progress is not None and message != last_progress:
+            on_progress(message)
+        last_progress = message
+
+    check_cancelled()
+    report("Waiting for systemd to start the service...")
     while True:
+        check_cancelled()
         current = _refresh(binding, _remaining(deadline))
+        check_cancelled()
         state = current.status.get("ActiveState")
         if state == "failed":
             raise ManagedServiceError("The managed service failed during startup")
         if state == "active" and (pid := _pid(current.status)) > 0:
+            report("Waiting for MCP / Cloudflare startup...")
             try:
-                port, path = _startup(current, pid)
-                version = _initialize(port, path, min(2.0, _remaining(deadline)))
+                startup = _startup(current, pid)
             except ManagedServiceError:
-                pass
-            else:
-                if expected_version is not None and version != expected_version:
-                    raise ManagedServiceError(
-                        "Running MCP version differs from the requested version"
-                    )
-                verified = _refresh(binding, _remaining(deadline))
-                if (
-                    verified.status.get("ActiveState") == "active"
-                    and _pid(verified.status) == pid
-                ):
-                    return verified.status
+                startup = None
+            if startup is not None:
+                check_cancelled()
+                report("Checking the local MCP connection...")
+                check_cancelled()
+                try:
+                    port, path = startup
+                    version = _initialize(port, path, min(2.0, _remaining(deadline)))
+                except ManagedServiceError:
+                    version = None
+                check_cancelled()
+                if version is not None:
+                    if expected_version is not None and version != expected_version:
+                        raise ManagedServiceError(
+                            "Running MCP version differs from the requested version"
+                        )
+                    verified = _refresh(binding, _remaining(deadline))
+                    check_cancelled()
+                    if (
+                        verified.status.get("ActiveState") == "active"
+                        and _pid(verified.status) == pid
+                    ):
+                        return verified.status
+        else:
+            report("Waiting for systemd to start the service...")
+        check_cancelled()
         time.sleep(min(0.1, _remaining(deadline)))
 
 
 def start_service(
-    binding: BoundService, *, timeout=60, expected_version: str | None = None
+    binding: BoundService,
+    *,
+    timeout=60,
+    expected_version: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
 ) -> dict[str, str]:
-    """Start this unit without enabling it, then verify its local MCP endpoint."""
+    """Start this unit, then allow cancellation of readiness waiting only."""
     deadline = _deadline(timeout)
     _authorize(binding)
     assert_external_process(binding, timeout=_remaining(deadline))
     _refresh(binding, _remaining(deadline))
+    if on_progress is not None:
+        on_progress("Starting the systemd service...")
     _run(
         binding.system, "start", binding.name + ".service", timeout=_remaining(deadline)
     )
+    options = {}
+    if on_progress is not None:
+        options["on_progress"] = on_progress
+    if cancel is not None:
+        options["cancel"] = cancel
     return wait_ready(
-        binding, timeout=_remaining(deadline), expected_version=expected_version
+        binding,
+        timeout=_remaining(deadline),
+        expected_version=expected_version,
+        **options,
     )
 
 

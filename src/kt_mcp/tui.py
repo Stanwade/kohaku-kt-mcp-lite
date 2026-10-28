@@ -947,6 +947,14 @@ def _screen(screen, controller: TerminalController):
                 destination = tui_actions.delete_dialog(screen, controller)
                 if destination is not None:
                     return destination
+            elif character in {"s", "x", "r"}:
+                from kt_mcp.tui_service import run_action
+
+                run_action(
+                    screen,
+                    controller,
+                    {"s": "start", "x": "stop", "r": "restart"}[character],
+                )
             elif character == "o":
                 _configure(screen, controller)
             elif character == "i":

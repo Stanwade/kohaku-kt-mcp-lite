@@ -184,10 +184,14 @@ def _new_instance(screen, controller, workspace=None):
         default=False,
     ):
         try:
-            controller.act("s")
+            from kt_mcp.tui_service import run_action
+
+            panel = controller.selected_controller()
+            run_action(screen, panel, "start")
+            controller.note = f"{item.name}: {panel.note}"
         except tui.UI_ERRORS as exc:
             controller.note = controller.redact(
-                f"{item.name} was saved but could not start: {exc}"
+                f"{item.name} saved. Start did not complete: {exc}"
             )
             message(screen, "Instance saved", controller.note)
     return item
@@ -507,11 +511,14 @@ def instance_screen(
                     controller.selected_controller(),
                     kind="link" if character == "u" else "client-config",
                 )
+            elif character in {"s", "x", "r"}:
+                from kt_mcp.tui_service import run_action
+
+                panel = controller.selected_controller()
+                action = {"s": "start", "x": "stop", "r": "restart"}[character]
+                run_action(screen, panel, action)
+                controller.note = f"{panel.manager.name}: {panel.note}"
             else:
-                if character in {"s", "x", "r"}:
-                    controller.note = "Working on the selected instance..."
-                    tui._put(screen, height - 1, 1, controller.note)
-                    screen.refresh()
                 popup = controller.act(character)
                 if popup:
                     tui._popup(screen, *popup)
