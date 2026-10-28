@@ -1,90 +1,67 @@
-# v0.2.2 — One-command Linux installation
+# v0.2.3 — Clearer terminal UI and direct MCP links
 
-Ubuntu / Linux 现在可以直接从网络安装，不再需要手动下载和解压 Release：
+本次聚焦 Linux 终端体验：引导更简短，重点信息更醒目，配置后直接在主页看到 MCP 连接地址。
+
+## 本次改进
+
+- 向导用颜色和粗体突出当前提示、默认值与确认步骤，保留输入检查、返回修改和取消。
+- 紧凑主页默认显示**含 MCP 访问令牌的完整 MCP link**，长地址完整换行，超出页面时可用上下键或 PgUp/PgDn 滚动。
+- `u` 打开纯链接视图，并给出带当前 `--config` 路径的准确单行导出命令；`c` 仍可查看客户端 JSON。
+- 日志只在按 `l` 时加载，日志和错误继续脱敏，Cloudflare Tunnel Token 不在主页或链接视图中显示。完整路径与管理帮助分别放在 `v` 和 `?`。
+- 无色终端自动降级；`NO_COLOR=1 kt-mcp` 关闭颜色，保留终端支持的粗体及默认前景/背景。`q` 只退出面板，不改变服务状态。
+
+local/named 的 `Configured` 地址可提前查看，不代表服务已启动。quick 等待当前服务的有效启动记录，未就绪、停止或记录失效时不沿用旧链接。`Startup verified` / `Tunnel started` 说明启动检查记录匹配当前进程，不是持续公网健康检查。
+
+## 直接获取连接地址
+
+默认配置和独立配置都支持：
 
 ```bash
-curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
+kt-mcp link
+kt-mcp link --config /absolute/path/config.json
 ```
 
-以普通用户运行。首次使用的 Ubuntu 若缺少依赖，先执行：
+输出只有完整 URL 和一个结尾换行，没有颜色、JSON 或人为折行。quick 未就绪时返回非零状态；local/named 成功导出只说明配置地址已知。需要 JSON 时继续使用 `kt-mcp client-config`，同样支持 `--config`。
+
+## 安装本版本
+
+以普通用户运行安装器。需要 Python 3.10+ 和联网获取依赖；新的 Ubuntu 环境若缺少依赖，先执行：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y curl ca-certificates python3 python3-venv bash coreutils
 ```
 
-需要 Python 3.10+。安装使用独立 venv，仍需联网获取 Python 依赖；安装器不会自动运行 sudo。
-
-## 本次改进
-
-- 独立发布在线 `install.sh`，`latest/download/install.sh` 提供固定入口；支持 `--version X.Y.Z` / `vX.Y.Z` 安装指定正式版本。
-- 默认只获取一次最新发布清单，随后使用其中的版本下载固定标签下的安装包，避免发布更新时混用不同版本。
-- 校验发行包 SHA256、归档路径与文件类型，以及包内全部文件的校验值，通过后才运行包内安装器。
-- 支持 `--prefix`、`--bin-dir`、`--python` 和 `--no-link`，正确处理中文、空格和相对路径；相对路径始终以执行在线安装命令时的目录为基准。
-- 实际安装在已校验的私有临时目录中进行，避免项目里的 `json.py`、`venv.py` 或继承的 Python 路径变量干扰旧安装器。
-- 下载失败、包损坏或依赖缺失时给出明确错误并清理临时下载；缺少 venv 时显示可复制的 Ubuntu 修复命令。
-- 安装结束提示实际命令路径；命令目录不在 PATH 时给出对应的 `export PATH=...`，不会改写 shell 配置。
-- 在线脚本作为独立 Release 资产纳入外层 `SHA256SUMS` 和源码包；Linux bundle 内的 `install.sh` 继续用于本地 wheel 安装。
-
-SHA256 用于校验下载内容与发布清单的一致性。管道命令会直接执行下载的在线脚本，不代表先验证该脚本的签名。
-
-## 固定版本与自定义安装目录
-
-同时固定在线脚本和软件版本：
-
-```bash
-curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/download/v0.2.2/install.sh \
-  | bash -s -- --version 0.2.2 --prefix "$HOME/apps/kt-mcp" --bin-dir "$HOME/.local/bin"
-```
-
-默认安装环境为 `${XDG_DATA_HOME:-$HOME/.local/share}/kt-mcp/venv`，命令链接为 `$HOME/.local/bin/kt-mcp`。安装目录与 MCP 工作目录是两回事。
-
-在自动化脚本中，让外层 shell 也检查管道的下载端失败：
+固定在线脚本和软件版本安装，外层 `pipefail` 同时检查下载端失败：
 
 ```bash
 (
   set -o pipefail
-  curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/download/v0.2.2/install.sh \
-    | bash -s -- --version 0.2.2
+  curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/download/v0.2.3/install.sh \
+    | bash -s -- --version 0.2.3
 )
 ```
 
-## 安装之后
+按安装输出设置 PATH，再进入希望 MCP 访问的已有项目目录运行 `kt-mcp`。首次向导按 Enter 接受显示的当前目录，也可输入其他路径；保存后按 `i` 注册并启动用户服务。已有配置直接沿用保存的工作区，切换 shell 目录不会重新配置服务。在线安装本身不创建配置或启动服务。
 
-按安装输出设置当前 shell 的 PATH，然后进入希望 MCP 访问的项目目录，运行 `kt-mcp` 或 `kt-mcp tui`。首次向导按 Enter 接受显示的当前目录，也可输入其他已有目录；保存前支持返回修改或取消。
+## 升级已有服务
 
-保存配置后，TUI 中按 `i` 注册并启动用户服务、启用 linger，按 `q` 退出面板。后台运行继续由 systemd 管理。在线安装不会创建配置、弹出 TUI 或自动启动服务。
-
-## 从已有 Linux 安装升级
-
-继续使用原来的安装前缀；如果已经注册并运行服务，先停止，安装成功后再启动：
+继续使用原安装位置，先停服务，安装成功后再启动：
 
 ```bash
 (
   set -euo pipefail
   kt-mcp service stop
-  curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/download/v0.2.2/install.sh \
-    | bash -s -- --version 0.2.2
+  curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/download/v0.2.3/install.sh \
+    | bash -s -- --version 0.2.3
   kt-mcp service start
 )
 ```
 
-自定义安装继续传入原 `--prefix` / `--bin-dir`，服务管理继续使用对应的 `--name` / `--system` 参数。配置、令牌和工作区会保留。安装器只更新自己标记的 venv；更换 Python 主/小版本时使用新的安装前缀。
+自定义安装沿用原 `--prefix`、`--bin-dir`、`--python`，服务管理沿用对应的 `--name` / `--system` 和所需权限；安装器仍以普通用户执行。配置、令牌和工作区保留。更换 Python 主/小版本时使用新的安装前缀。完整步骤见 [Ubuntu 指南](https://github.com/Stanwade/kohaku-kt-mcp-lite/blob/v0.2.3/UBUNTU.md)。
 
-手动下载、校验、解压安装和源码安装仍可使用，完整步骤见 [Ubuntu 指南](https://github.com/Stanwade/kohaku-kt-mcp-lite/blob/v0.2.2/UBUNTU.md)。
+## 发布门禁
 
-## 发布内容与验证范围
+发行内容继续包括在线入口、Linux 安装包、wheel、源码包和 `SHA256SUMS`。正式发布由现有 CI 门禁控制：三平台回归、真实 systemd 生命周期及全新安装包的 12 工具验收全部成功后，才公开 Release。
 
-| 资产 | 用途 |
-| --- | --- |
-| `install.sh` | 在线安装入口，可通过 curl 管道交给 Bash |
-| `kt-mcp-0.2.2-linux.tar.gz` | wheel、本地安装器、使用说明、许可文件和内部校验清单 |
-| `kohaku_kt_mcp-0.2.2-py3-none-any.whl` | Python 分发包 |
-| `kohaku_kt_mcp-0.2.2.tar.gz` | 源码分发包，包含在线安装器 |
-| `SHA256SUMS` | 以上四个资产的 SHA256 |
-
-新增 16 项离线管道安装用例，覆盖版本选择、目标路径、Python 环境隔离、stdin、下载与校验失败、归档边界、前置依赖和清理行为。另已使用公开 v0.2.1 发布包完成真实网络安装，验证向后兼容。
-
-发布门禁继续覆盖 Ubuntu 22.04 / Python 3.10、Ubuntu 24.04 / Python 3.12、Windows / Python 3.12，以及真实 systemd、全新安装包和全部 12 个 MCP 工具。全部检查通过后才公开 Release。
-
-验证面向 Ubuntu x86_64；其他发行版和 ARM64 仍需另行验收。本次没有重建 Windows EXE。WSL 服务仍受 WSL 虚拟机生命周期约束。LICENSE、NOTICE 和上游归属保持保留。
+目标仍为 Ubuntu x86_64；其他发行版和 ARM64 需另行验收。本次未重建 Windows EXE，LICENSE、NOTICE 和上游归属保持保留。
