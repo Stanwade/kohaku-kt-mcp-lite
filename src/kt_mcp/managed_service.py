@@ -120,7 +120,14 @@ def _run(system: bool, *arguments: str, timeout=COMMAND_TIMEOUT) -> str:
         and arguments[0] == "show"
         and "LoadState=not-found" in result.stdout.splitlines()
     )
-    if result.returncode and not missing:
+    empty_unit_files = (
+        arguments
+        and arguments[0] == "list-unit-files"
+        and result.returncode == 1
+        and result.stdout == ""
+        and result.stderr == ""
+    )
+    if result.returncode and not (missing or empty_unit_files):
         # External diagnostics may contain configuration or credential values.
         raise ManagedServiceError(
             "systemd command failed; check the service manager and account permissions"

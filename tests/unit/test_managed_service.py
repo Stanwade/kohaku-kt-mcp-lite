@@ -569,6 +569,35 @@ def test_external_command_failures_do_not_echo_credentials(installation, monkeyp
     assert TOKEN not in str(failure.value)
 
 
+def test_list_unit_files_accepts_empty_no_match_result(monkeypatch):
+    def empty(arguments, **kwargs):
+        return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", empty)
+    assert module._run(True, "list-unit-files", "kt-mcp*.service") == ""
+
+
+@pytest.mark.parametrize(
+    "action,code,output,error",
+    [
+        ("list-unit-files", 1, "", "Failed to connect to bus: " + TOKEN),
+        ("list-unit-files", 1, "unexpected output", ""),
+        ("list-unit-files", 2, "", ""),
+        ("list-units", 1, "", ""),
+    ],
+)
+def test_empty_listing_exception_does_not_hide_systemd_errors(
+    monkeypatch, action, code, output, error
+):
+    def fail(arguments, **kwargs):
+        return subprocess.CompletedProcess(arguments, code, stdout=output, stderr=error)
+
+    monkeypatch.setattr(module.subprocess, "run", fail)
+    with pytest.raises(ManagedServiceError, match="systemd command failed") as failure:
+        module._run(True, action, "kt-mcp*.service")
+    assert TOKEN not in str(failure.value)
+
+
 def test_find_services_includes_both_scopes_without_modifying_them(
     installation, monkeypatch
 ):
