@@ -1,12 +1,15 @@
 import builtins
+import json
+import os
 import stat
 import sys
+from dataclasses import replace
 
 import pytest
 
 from kt_mcp.daemon import DaemonConfig, load_config, save_config
 from kt_mcp.desktop import DesktopSettings
-from kt_mcp.onboarding import SetupCancelled, setup_config
+from kt_mcp.onboarding import ConfigEditor, SetupCancelled, edit_config, setup_config
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Linux first-run onboarding"
@@ -361,3 +364,232 @@ def test_existing_configuration_is_preserved_before_any_prompt(tmp_path):
 
     assert path.read_bytes() == original
     assert load_config(path) == existing
+
+
+class EditInputs:
+    def __init__(self, values, path):
+        self.remaining = list(values)
+        self.path = path
+        self.original = path.read_bytes()
+        self.prompts = []
+
+    def __call__(self, prompt):
+        assert self.path.read_bytes() == self.original, "editing saved before review"
+        self.prompts.append(prompt)
+        if not self.remaining:
+            pytest.fail("The edit wizard requested an unexpected answer")
+        value = self.remaining.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
+@pytest.fixture
+def existing_configuration(tmp_path):
+    workspace = tmp_path / "original workspace"
+    workspace.mkdir()
+    config = DaemonConfig(
+        DesktopSettings(
+            str(workspace),
+            9123,
+            "named",
+            "https://old.example.com",
+            "/opt/cloudflared",
+        ),
+        MCP_TOKEN,
+        TUNNEL_TOKEN,
+    )
+    path = tmp_path / "existing config.json"
+    save_config(config, path)
+    return path, config
+
+
+@pytest.mark.parametrize("replacement", ["", "replacement-tunnel-credential"])
+def test_edit_prefills_saved_values_and_keeps_credentials_hidden(
+    existing_configuration, tmp_path, monkeypatch, capsys, replacement
+):
+    path, original = existing_configuration
+    workspace = tmp_path / 'new workspace 中文 % $ "quote"'
+    workspace.mkdir()
+    owner = path.stat().st_uid, path.stat().st_gid
+    monkeypatch.setenv("KT_MCP_TOKEN", "unrelated-shell-token")
+    monkeypatch.setenv("TUNNEL_TOKEN", "unrelated-shell-tunnel-token")
+    answers = EditInputs(
+        [str(workspace), "8123", "", "https://new.example.com", ""], path
+    )
+    hidden = EditInputs([replacement], path)
+
+    edited = edit_config(path, ask=answers, ask_secret=hidden)
+
+    assert not answers.remaining and not hidden.remaining
+    assert edited.settings.workspace == str(workspace)
+    assert edited.settings.port == 8123
+    assert edited.settings.mode == "named"
+    assert edited.settings.public_origin == "https://new.example.com"
+    assert edited.settings.cloudflared == original.settings.cloudflared
+    assert edited.token == original.token
+    assert edited.tunnel_token == (replacement or original.tunnel_token)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["token"] == original.token
+    assert saved["tunnel_token"] == edited.tunnel_token
+    assert str(original.settings.workspace) in answers.prompts[0]
+    assert "9123" in answers.prompts[1]
+    assert "named" in answers.prompts[2]
+    assert original.settings.public_origin in answers.prompts[3]
+    assert "Enter keeps it" in hidden.prompts[0]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert (path.stat().st_uid, path.stat().st_gid) == owner
+    output = capsys.readouterr()
+    shown = output.out + output.err + "\n".join(answers.prompts + hidden.prompts)
+    for secret in (
+        MCP_TOKEN,
+        TUNNEL_TOKEN,
+        replacement,
+        "unrelated-shell-token",
+        "unrelated-shell-tunnel-token",
+    ):
+        if secret:
+            assert secret not in shown, "editing displayed a credential"
+    assert "Configure" in shown
+
+
+def test_edit_can_change_mode_without_rotating_the_access_token(existing_configuration):
+    path, original = existing_configuration
+    answers = EditInputs(["", "", "quick", ""], path)
+
+    edited = edit_config(path, ask=answers, ask_secret=no_secret)
+
+    assert edited.settings.mode == "quick"
+    assert edited.settings.public_origin == ""
+    assert edited.tunnel_token == ""
+    assert edited.token == original.token
+
+
+@pytest.mark.parametrize("abort", [":q", EOFError(), KeyboardInterrupt()])
+def test_cancelled_edit_keeps_the_original_bytes_and_owner(
+    existing_configuration, abort
+):
+    path, _ = existing_configuration
+    original = path.read_bytes()
+    info = path.stat()
+    answers = EditInputs(["", "", "local", abort], path)
+
+    with pytest.raises(SetupCancelled, match="configuration unchanged"):
+        edit_config(path, ask=answers, ask_secret=no_secret)
+
+    assert path.read_bytes() == original
+    assert (path.stat().st_uid, path.stat().st_gid) == (info.st_uid, info.st_gid)
+    assert path.stat().st_mtime_ns == info.st_mtime_ns
+
+
+@pytest.mark.parametrize("change", ["content", "replacement", "permissions", "symlink"])
+def test_edit_refuses_a_configuration_changed_during_the_wizard(
+    existing_configuration, change
+):
+    path, config = existing_configuration
+    original = path.read_bytes()
+    answers = EditInputs(["", "", "local"], path)
+
+    def ask(prompt):
+        if answers.remaining:
+            return answers(prompt)
+        if change == "content":
+            path.write_bytes(original + b"\n")
+        elif change == "replacement":
+            save_config(config, path, replace=True)
+        elif change == "permissions":
+            path.chmod(0o400)
+        else:
+            target = path.with_name("external-config.json")
+            path.rename(target)
+            path.symlink_to(target)
+        return ""
+
+    with pytest.raises(ValueError, match="changed outside"):
+        edit_config(path, ask=ask, ask_secret=no_secret)
+
+    assert path.read_bytes() == (original + b"\n" if change == "content" else original)
+    assert path.is_symlink() == (change == "symlink")
+    if change == "permissions":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    assert not list(path.parent.glob("." + path.name + ".*"))
+
+
+def test_failed_atomic_edit_keeps_the_original_file_and_cleans_temporary_data(
+    existing_configuration, monkeypatch
+):
+    path, _ = existing_configuration
+    original = path.read_bytes()
+    answers = EditInputs(["", "", "local", ""], path)
+
+    def fail_replace(*arguments):
+        raise OSError("fixture filesystem publication failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="publication failure"):
+        edit_config(path, ask=answers, ask_secret=no_secret)
+
+    assert path.read_bytes() == original
+    assert not list(path.parent.glob("." + path.name + ".*"))
+
+
+def test_editor_restores_exact_original_bytes_after_a_later_failure(
+    existing_configuration,
+):
+    path, original = existing_configuration
+    before = path.read_bytes() + b"\n"
+    path.write_bytes(before)
+    editor = ConfigEditor(path)
+    edited = replace(original, settings=replace(original.settings, port=8123))
+
+    editor.save(edited)
+    assert editor.saved
+    assert load_config(path).settings.port == 8123
+    editor.restore()
+
+    assert not editor.saved
+    assert path.read_bytes() == before
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_rollback_never_overwrites_an_external_configuration(existing_configuration):
+    path, original = existing_configuration
+    editor = ConfigEditor(path)
+    editor.save(replace(original, settings=replace(original.settings, port=8123)))
+    external = replace(original, settings=replace(original.settings, port=7123))
+    save_config(external, path, replace=True)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="changed outside"):
+        editor.restore()
+
+    assert path.read_bytes() == before
+
+
+def test_editor_refuses_access_token_changes(existing_configuration):
+    path, original = existing_configuration
+    editor = ConfigEditor(path)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="preserve the MCP access token"):
+        editor.save(replace(original, token="different-access-token-" + "b" * 32))
+
+    assert path.read_bytes() == before
+
+
+@pytest.mark.skipif(
+    getattr(os, "geteuid", lambda: -1)() != 0,
+    reason="preserving another account's owner requires an existing root test context",
+)
+def test_root_edit_preserves_the_original_non_root_owner(existing_configuration):
+    path, original = existing_configuration
+    os.chown(path, 65534, 65534)
+    editor = ConfigEditor(path)
+
+    editor.save(replace(original, settings=replace(original.settings, port=8123)))
+
+    assert (path.stat().st_uid, path.stat().st_gid) == (65534, 65534)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    editor.restore()
+    assert (path.stat().st_uid, path.stat().st_gid) == (65534, 65534)
+    assert load_config(path) == original

@@ -1,78 +1,170 @@
 """Shared, reversible terminal setup before any configuration is written."""
 
 import getpass
+import json
 import os
-import re
 import secrets
-import sys
+import stat
+import tempfile
 import warnings
 from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from kt_mcp.auth import MCPPathAuth
 from kt_mcp.daemon import DaemonConfig, save_config
 from kt_mcp.desktop import DesktopSettings
+from kt_mcp.terminal_style import TerminalStyle as _TerminalStyle
 
 
 class SetupCancelled(Exception):
     """The user left setup without confirming a configuration."""
 
 
-class _TerminalStyle:
-    """Use the current terminal's capabilities without decorating redirected text."""
+@dataclass(frozen=True)
+class _ConfigSnapshot:
+    data: bytes = field(repr=False)
+    identity: tuple[int, ...]
+    uid: int
+    gid: int
 
-    def __init__(self):
-        self._bold = ""
-        self._reset = ""
-        self._colors = {}
-        term = os.environ.get("TERM", "")
+
+def _file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+    )
+
+
+def _snapshot(path: Path) -> _ConfigSnapshot:
+    if path.is_symlink():
+        raise ValueError("Configuration must not be a symbolic link.")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("Configuration must be a regular file.")
+        if os.name == "posix":
+            if stat.S_IMODE(info.st_mode) & 0o077:
+                raise ValueError("Configuration must be private; set its mode to 600.")
+            if os.geteuid() not in (0, info.st_uid):
+                raise PermissionError("Configuration belongs to another account.")
+        data = stream.read()
+        identity = _file_identity(info)
         if (
-            not sys.stdin.isatty()
-            or not sys.stdout.isatty()
-            or not term
-            or term.lower() == "dumb"
+            _file_identity(os.fstat(stream.fileno())) != identity
+            or _file_identity(path.lstat()) != identity
         ):
-            return
-        try:
-            import curses
-        except ImportError:
-            return
+            raise ValueError("Configuration changed while it was being read; retry.")
+    return _ConfigSnapshot(data, identity, info.st_uid, info.st_gid)
 
-        def sequence(value: bytes | None) -> str:
-            # terminfo padding directives are for tputs(), not printable text.
-            return re.sub(rb"\$<[^>]*>", b"", value or b"").decode("ascii")
 
+class ConfigEditor:
+    """Keep a private config's original bytes for checked publication and rollback.
+
+    The saved file, rather than this shell's token environment, supplies edit
+    defaults. Both save and rollback refuse a file changed by another writer.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path).expanduser().absolute()
+        self._original = _snapshot(self.path)
+        self._saved: _ConfigSnapshot | None = None
         try:
-            curses.setupterm(term=term, fd=sys.stdout.fileno())
-            reset = sequence(curses.tigetstr("sgr0"))
-            if not reset:
-                return
-            bold = sequence(curses.tigetstr("bold"))
-            colors = {}
-            foreground = curses.tigetstr("setaf")
-            if (
-                "NO_COLOR" not in os.environ
-                and foreground
-                and curses.tigetnum("colors") >= 8
+            data = json.loads(self._original.data)
+        except (ValueError, UnicodeError):
+            raise ValueError("Configuration must contain valid JSON.") from None
+        fields = set(DesktopSettings.__dataclass_fields__)
+        if (
+            not isinstance(data, dict)
+            or type(data.get("version")) is not int
+            or data["version"] != 1
+            or set(data) - fields - {"version", "token", "tunnel_token"}
+        ):
+            raise ValueError("Configuration must be a supported version 1 object.")
+        self.config = DaemonConfig(
+            DesktopSettings(**{key: data[key] for key in fields if key in data}),
+            data.get("token", ""),
+            data.get("tunnel_token", ""),
+        )
+        self.config.validate()
+
+    @property
+    def saved(self) -> bool:
+        return self._saved is not None
+
+    def _unchanged(self, expected: _ConfigSnapshot):
+        try:
+            unchanged = _snapshot(self.path) == expected
+        except (OSError, ValueError):
+            unchanged = False
+        if not unchanged:
+            raise ValueError(
+                "Configuration changed outside this editor; reload and try again."
+            )
+
+    def _replace(self, expected: _ConfigSnapshot, data: bytes) -> _ConfigSnapshot:
+        self._unchanged(expected)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix="." + self.path.name + ".", dir=self.path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                if os.name == "posix":
+                    info = os.fstat(stream.fileno())
+                    if (info.st_uid, info.st_gid) != (expected.uid, expected.gid):
+                        os.fchown(stream.fileno(), expected.uid, expected.gid)
+                    os.fchmod(stream.fileno(), 0o600)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+                written = os.fstat(stream.fileno())
+            self._unchanged(expected)
+            os.replace(temporary, self.path)
+            published = _snapshot(self.path)
+            if published.data != data or published.identity[:2] != (
+                written.st_dev,
+                written.st_ino,
             ):
-                for name, number in (("cyan", 6), ("green", 2), ("yellow", 3)):
-                    colors[name] = sequence(curses.tparm(foreground, number))
-        except (curses.error, OSError, ValueError):
-            return
-        self._bold = bold
-        self._reset = reset
-        self._colors = colors
+                raise ValueError("Configuration changed while saving; reload it.")
+            return published
+        finally:
+            temporary.unlink(missing_ok=True)
 
-    def text(self, value: str, *, bold: bool = False, color: str = "") -> str:
-        prefix = (self._bold if bold else "") + self._colors.get(color, "")
-        return prefix + value + self._reset if prefix else value
+    def save(self, config: DaemonConfig):
+        if self.saved:
+            raise ValueError("This configuration edit has already been saved.")
+        config.validate()
+        if config.token != self.config.token:
+            raise ValueError("Editing settings must preserve the MCP access token.")
+        data = (
+            json.dumps(
+                {
+                    "version": 1,
+                    **asdict(config.settings),
+                    "token": config.token,
+                    "tunnel_token": config.tunnel_token,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8")
+        self._saved = self._replace(self._original, data)
 
-    def prompt(self, label: str, default: str | None = None) -> str:
-        label = self.text(label, bold=True)
-        if default is not None:
-            label += " [" + self.text(default, bold=True, color="cyan") + "]"
-        return label + ": "
+    def restore(self):
+        """Restore only this editor's still-current publication after a failed edit."""
+        if self._saved is not None:
+            self._replace(self._saved, self._original.data)
+            self._saved = None
 
 
 def _read(reader: Callable[[str], str], prompt: str) -> str:
@@ -164,20 +256,7 @@ def setup_config(
         raise FileExistsError(
             "configuration already exists; it will not be overwritten"
         )
-    ask = input if ask is None else ask
-    ask_secret = getpass.getpass if ask_secret is None else ask_secret
-    cwd = Path.cwd().resolve()
     settings = defaults if defaults is not None else DesktopSettings(mode="local")
-    workspace = Path(settings.workspace or cwd).expanduser()
-    if not workspace.is_absolute():
-        workspace = cwd / workspace
-    values = {
-        "workspace": str(workspace),
-        "port": str(settings.port),
-        "mode": settings.mode,
-        "origin": settings.public_origin,
-        "tunnel_token": "",
-    }
     token = os.environ.get("KT_MCP_TOKEN") or secrets.token_urlsafe(32)
     try:
         MCPPathAuth(None, token=token)
@@ -186,9 +265,78 @@ def setup_config(
             "KT_MCP_TOKEN must contain 32-128 URL-safe characters "
             "(letters, digits, _ or -); fix or unset this environment variable."
         ) from None
-    environment_tunnel_token = os.environ.get("TUNNEL_TOKEN", "")
+    return _collect_config(
+        path,
+        settings,
+        token,
+        ask=ask,
+        ask_secret=ask_secret,
+        tunnel_token="",
+        environment_tunnel_token=os.environ.get("TUNNEL_TOKEN", ""),
+        save=lambda config: save_config(config, path),
+        title="Setup",
+    )
+
+
+def edit_config(
+    path: Path,
+    *,
+    ask: Callable[[str], str] | None = None,
+    ask_secret: Callable[[str], str] | None = None,
+    editor: ConfigEditor | None = None,
+) -> DaemonConfig:
+    """Review existing settings, preserving credentials and the file's owner.
+
+    A caller coordinating a service change can supply an editor and call its
+    restore() method if updating the unit fails after the user saves.
+    """
+    path = Path(path).expanduser().absolute()
+    editor = ConfigEditor(path) if editor is None else editor
+    if editor.path != path:
+        raise ValueError("The editor belongs to a different configuration file.")
+    try:
+        return _collect_config(
+            path,
+            editor.config.settings,
+            editor.config.token,
+            ask=ask,
+            ask_secret=ask_secret,
+            tunnel_token=editor.config.tunnel_token,
+            environment_tunnel_token="",
+            save=editor.save,
+            title="Configure",
+        )
+    except SetupCancelled:
+        raise SetupCancelled("Changes cancelled; configuration unchanged.") from None
+
+
+def _collect_config(
+    path: Path,
+    settings: DesktopSettings,
+    token: str,
+    *,
+    ask: Callable[[str], str] | None,
+    ask_secret: Callable[[str], str] | None,
+    tunnel_token: str,
+    environment_tunnel_token: str,
+    save: Callable[[DaemonConfig], None],
+    title: str,
+) -> DaemonConfig:
+    ask = input if ask is None else ask
+    ask_secret = getpass.getpass if ask_secret is None else ask_secret
+    cwd = Path.cwd().resolve()
+    workspace = Path(settings.workspace or cwd).expanduser()
+    if not workspace.is_absolute():
+        workspace = cwd / workspace
+    values = {
+        "workspace": str(workspace),
+        "port": str(settings.port),
+        "mode": settings.mode,
+        "origin": settings.public_origin,
+        "tunnel_token": tunnel_token,
+    }
     style = _TerminalStyle()
-    print(style.text("Kohaku KT MCP · Setup", bold=True, color="cyan"))
+    print(style.text("Kohaku KT MCP · " + title, bold=True, color="cyan"))
     print("Enter = default   :back = back   :q = cancel")
     step = 0
     while True:
@@ -249,7 +397,7 @@ def setup_config(
                     )
                 )
                 continue
-            save_config(config, path)
+            save(config)
             print(style.text("Saved", bold=True, color="green") + f" {path}")
             return config
 
