@@ -171,7 +171,7 @@ unset TUNNEL_TOKEN
 ```bash
 kt-mcp service install --now --linger
 kt-mcp service status
-kt-mcp client-config
+kt-mcp link
 ```
 
 `--now` 注册并启用、启动服务。`--linger` 请求 systemd 在该用户未登录时也启动用户管理器，使服务在退出 SSH 后继续运行，并随系统启动。若系统策略拒绝普通用户启用 linger，执行：
@@ -232,7 +232,7 @@ kt-mcp tui
 
 向导逐项检查工作区、端口和接入模式，输入有误会说明原因并让你重试。输入 `:back` 返回上一步并保留已填内容，`:q`、Ctrl+C 或 Ctrl+D 取消。最后会显示工作区的绝对路径、端口、接入模式及配置位置，按 Enter 保存；输入 `edit` 可从工作区开始修改。确认前不会写配置或启动服务，已有配置不会被覆盖。固定域名的 Tunnel Token 使用隐藏输入，摘要不显示令牌。
 
-面板使用 Python 标准库 curses，不需要 Tk 或桌面环境。通过 SSH 使用时需要分配终端，例如 `ssh -t user@host`。
+向导和面板使用颜色与粗体突出提示、默认值、地址和状态。无色终端自动降级；使用 `NO_COLOR=1 kt-mcp` 可关闭颜色，保留终端支持的粗体。面板使用 Python 标准库 curses，不需要 Tk 或桌面环境；通过 SSH 使用时需要分配终端，例如 `ssh -t user@host`。
 
 | 按键 | 操作 |
 | --- | --- |
@@ -240,15 +240,18 @@ kt-mcp tui
 | `s` / `x` / `r` | 启动 / 停止 / 重启 |
 | `e` / `d` | 启用 / 取消自启动；不改变当前运行状态 |
 | `g` | 启用用户 linger |
-| `l` | 查看可滚动的日志，遮盖已知令牌 |
+| `u` | 查看纯链接，以及带当前 `--config` 路径的单行导出命令 |
+| `l` | 按需加载可滚动日志，遮盖已知令牌 |
 | `c` | 显式显示含访问令牌的客户端 JSON；需要完整原始 JSON 时用 `kt-mcp client-config`，避免屏幕折行影响复制 |
 | `v` | 查看完整工作区、配置和 unit 路径，不显示令牌 |
 | `?` | 查看按键帮助、当前实例的 CLI 命令和 linger 权限问题的处理方式 |
-| `q` | 退出面板，后台服务继续运行 |
+| `q` | 退出面板，不改变后台服务状态 |
 
-面板显示 systemd 状态、PID、重启次数、工作区、接入模式、日志和 linger 状态，并根据未注册、停止、启动中、失败或运行状态提示下一步。systemd 的 active 表示服务进程已启动，MCP 或 Tunnel 是否就绪仍应查看日志。普通模式应看到 `Linger: yes` 且自启动状态为 `enabled`，才能确保未登录时仍启动用户服务。
+紧凑主页显示进程状态、PID、重启次数、工作区、Boot/Linger，以及**含 MCP 访问令牌的完整 MCP link**，并按当前状态提示操作。配置路径和其他细节放在 `v`，日志只在按 `l` 时加载。日志继续脱敏，Cloudflare Tunnel Token 不在主页或链接视图中显示。
 
-最小终端尺寸为 64×18；进程状态与自启动信息分行显示，长路径会在中间省略并保留末尾目录名，按 `v` 查看完整路径。弹窗按终端显示宽度换行，支持中文；日志、详情、帮助和客户端 JSON 窗口支持方向键、PgUp/PgDn，Enter/Esc/q 返回主面板。
+local/named 的 `Configured` 地址可在未启动时查看，不表示服务可用。quick 必须等当前服务的有效启动记录，等待、停止、失败或记录失效时不继续显示旧链接。systemd 的 active 只表示进程已启动；`Startup verified` / `Tunnel started` 还要求启动记录与该 unit 的 MainPID 匹配。这是启动时的 MCP 检查和首次隧道连接记录，不是持续健康探测，也不保证公网 DNS、路由或访问可用。普通用户服务应启用自启动，并确认 `Linger: yes`。
+
+最小终端尺寸为 64×18。长链接完整换行，超出页面时用上下键或 PgUp/PgDn 滚动，不省略字符；复制时若终端带入折行，按 `u` 查看准确的单行导出命令。工作区长路径在中间省略，完整路径见 `v`。弹窗支持中文和方向键、PgUp/PgDn 滚动，Enter/Esc/q 返回主面板。
 
 多实例使用与安装相同的 `--name` 和 `--config`。管理已安装的系统级服务时使用 `tui --system --config /absolute/path/config.json`，需要相应权限；系统级首次注册仍通过显式指定 `--run-as` 的 CLI 完成。
 
@@ -260,13 +263,19 @@ kt-mcp daemon
 
 这是供服务管理器托管的前台进程，复用桌面版的 HTTP / Tunnel 生命周期但不导入 Tk。它处理 SIGTERM/SIGINT，关闭时清理本实例的工具任务及连接器。启动失败或连接器退出时返回非零状态，供服务管理器决定重启。日志写入 stderr 并遮盖令牌。
 
-显式导出包含访问令牌的客户端 JSON：
+只获取连接地址时，默认配置使用 `kt-mcp link`，独立配置使用：
+
+```bash
+kt-mcp link --config /absolute/path/config.json
+```
+
+stdout 只有原始完整 URL 和一个结尾换行，没有颜色、JSON 或人为折行。需要包含访问令牌的客户端 JSON 时仍可运行：
 
 ```bash
 kt-mcp client-config
 ```
 
-Quick Tunnel 必须等服务启动后才能导出当前公网地址，重启可能更换地址。固定域名和本机地址可提前导出。运行状态写入同目录的 `config.status.json`（同样 `0600`），正常停止后移除。
+两种导出命令都支持 `--config`。Quick Tunnel 必须等有效启动记录，未就绪时返回非零状态，重启可能更换地址。固定域名和本机地址可提前导出，成功输出不代表服务正在运行。运行状态写入同目录的 `config.status.json`（同样 `0600`），正常停止后移除。
 
 新增的管理命令仅用于 Linux；Windows 继续使用桌面 GUI。Linux 中仅当完全无参数且 stdin、stdout 都是交互终端时，`kt-mcp` 会直接进入 TUI。通过管道启动的 MCP 客户端继续使用 stdio；使用 PTY 的客户端应明确传入 `--transport stdio`。原来的 `kt-mcp --workspace ...` stdio 和 `--transport http` 用法保持兼容。非交互 `init` 缺少 `--workspace` 时会明确报错，不会读取协议输入。
 

@@ -7,6 +7,7 @@ Every instance uses a unique unit, private temp config and loopback port.
 import asyncio
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -30,26 +31,45 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def quit_tui_in_terminal(path, name):
+def quit_tui_in_terminal(path, name, expected_url):
+    try:
+        _quit_tui_in_terminal(path, name, expected_url)
+    except Exception:  # noqa: BLE001 -- pytest otherwise renders credential arguments
+        pytest.fail("The service panel could not be verified or closed", pytrace=False)
+
+
+def _quit_tui_in_terminal(path, name, expected_url):
     import fcntl
     import pty
     import select
     import struct
     import termios
 
-    master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 110, 0, 0))
-    process = subprocess.Popen(
-        [sys.executable, "-m", "kt_mcp", "tui", "--config", str(path), "--name", name],
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-        env={**os.environ, "TERM": "xterm-256color", "LC_ALL": "C.UTF-8"},
-        start_new_session=True,
-    )
-    os.close(slave)
-    output = bytearray()
+    master = slave = None
+    process = None
     try:
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 110, 0, 0))
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "kt_mcp",
+                "tui",
+                "--config",
+                str(path),
+                "--name",
+                name,
+            ],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            env={**os.environ, "TERM": "xterm-256color", "LC_ALL": "C.UTF-8"},
+            start_new_session=True,
+        )
+        os.close(slave)
+        slave = None
+        output = bytearray()
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if select.select([master], [], [], 0.2)[0]:
@@ -61,15 +81,29 @@ def quit_tui_in_terminal(path, name):
                     break
             if process.poll() is not None:
                 break
-        assert b"Quit panel" in output, output.decode("utf-8", errors="replace")
+        if b"Quit panel" not in output:
+            pytest.fail("The installed service panel did not render", pytrace=False)
+        plain = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", output)
+        if b"MCP link" not in plain or expected_url.encode("utf-8") not in plain:
+            pytest.fail(
+                "The service panel did not display its complete MCP link by default",
+                pytrace=False,
+            )
         os.write(master, b"q")
-        assert process.wait(timeout=10) == 0
-        return output.decode("utf-8", errors="replace")
+        if process.wait(timeout=10) != 0:
+            pytest.fail("The service panel did not exit cleanly", pytrace=False)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
-        os.close(master)
+        try:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+        finally:
+            try:
+                if slave is not None:
+                    os.close(slave)
+            finally:
+                if master is not None:
+                    os.close(master)
 
 
 def wait_ready(manager, path, *, previous_pid=None, timeout=30):
@@ -139,12 +173,11 @@ async def test_real_systemd_restart_cleanup_and_independent_lifetime(tmp_path):
         first_pid = await asyncio.to_thread(wait_ready, manager, path)
         assert manager.status()["UnitFileState"] == "enabled"
         assert token not in manager.unit_path.read_text()
-        terminal_output = await asyncio.to_thread(quit_tui_in_terminal, path, name)
-        assert token not in terminal_output
+        url = f"http://127.0.0.1:{port}/mcp/{token}"
+        await asyncio.to_thread(quit_tui_in_terminal, path, name, url)
         assert int(manager.status()["MainPID"]) == first_pid
         assert manager.status()["ActiveState"] == "active"
 
-        url = f"http://127.0.0.1:{port}/mcp/{token}"
         async with (
             httpx.AsyncClient(trust_env=False) as http,
             streamable_http_client(url, http_client=http) as (read, write, _),

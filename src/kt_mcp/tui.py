@@ -9,7 +9,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from kt_mcp.daemon import client_url, default_config_path, load_config
+from kt_mcp.daemon import client_url, default_config_path, load_config, startup_url
 from kt_mcp.desktop import client_configuration
 from kt_mcp.onboarding import SetupCancelled, setup_config
 from kt_mcp.service import ServiceError, ServiceManager
@@ -106,43 +106,40 @@ def next_steps(
     system: bool = False,
     error: str = "",
 ) -> tuple[str, str]:
-    """Two short guidance lines based on systemd process and persistence state."""
+    """Keep the relevant service action and persistence reminders compact."""
     if error or not status:
-        return (
-            "Next: [l] Logs or [?] Help; status is unavailable.",
-            "Status will be checked again automatically.",
-        )
+        return "Status unavailable. [l] Logs  [?] Help", ""
     load = status.get("LoadState", "")
     active = status.get("ActiveState", "")
     if load == "not-found":
         return (
             (
-                "Next: [?] Help to install a system unit with --run-as."
+                "Install with --system --run-as USER; [?] Help"
                 if system
-                else "Next: [i] Register/start this user service."
+                else "[i] Install/start this user service"
             ),
-            "The saved configuration will be used for installation.",
+            "",
         )
     if load in {"error", "bad-setting", "masked"}:
-        action = "Next: [l] Logs and [?] Help to inspect the unit."
+        action = "[l] Logs  [?] Help to inspect the unit"
     elif active == "failed":
-        action = "Next: [l] Logs to diagnose; [r] Restart to try again."
+        action = "[r] Restart  [l] Logs"
     elif active == "activating":
-        action = "Next: [l] Logs to follow startup."
+        action = "Starting... [l] Logs"
     elif active in {"deactivating", "reloading"}:
-        action = "Next: [l] Logs to follow the state change."
+        action = "State changing... [l] Logs"
     elif active == "inactive":
-        action = "Next: [s] Start this registered service."
+        action = "[s] Start this service"
     elif active == "active":
-        action = "Next: [c] Client JSON; check MCP startup in [l] Logs."
+        action = "[x] Stop  [r] Restart"
     else:
-        action = "Next: [l] Logs or [?] Help to inspect this state."
+        action = "[l] Logs  [?] Help to inspect this state"
     reminders = []
     if status.get("UnitFileState") != "enabled":
         reminders.append("Boot: [e] Enable.")
     if not system and linger != "yes":
         reminders.append("Linger: [g] Enable (see ?).")
-    return action, " ".join(reminders) or "Panel exit leaves the service unchanged."
+    return action, " ".join(reminders)
 
 
 class TerminalController:
@@ -153,8 +150,13 @@ class TerminalController:
         self.note = ""
         self.status = {}
         self.linger = "unknown"
-        self.logs = ""
+        self.linger_error = ""
         self.refresh_error = ""
+        self.connection_url = ""
+        self.connection_state = "Status unknown"
+        self.connection_detail = "The service has not been checked yet."
+        self.connection_verified = False
+        self.connection_tone = "warning"
         self._secrets = {
             secret for secret in (self.config.token, self.config.tunnel_token) if secret
         }
@@ -168,22 +170,101 @@ class TerminalController:
         return text
 
     def refresh(self):
-        """Publish a fresh snapshot, or discard old state after any polling error."""
+        """Refresh process and startup evidence; logs are queried only on request."""
+        self.status = {}
+        self.linger = "unknown"
+        self.linger_error = ""
+        self.refresh_error = ""
+        self.connection_url = ""
+        self.connection_verified = False
+        self.connection_state = "Status unknown"
+        self.connection_detail = "Service state could not be checked."
+        self.connection_tone = "warning"
         try:
             self.config = load_config(self.config_path)
-            status = self.manager.status()
-            linger = self.manager.linger_status()
-            logs = self.manager.logs(8)
+            self.redact("")  # Remember this generation's secrets before another reload.
+            if self.config.settings.mode != "quick":
+                self.connection_url = client_url(self.config, self.config_path)
         except UI_ERRORS as exc:
-            self.status = {}
-            self.linger = "unknown"
-            self.logs = ""
+            self.refresh_error = self.redact(str(exc))
+            self.connection_state = "Configuration unavailable"
+            self.connection_detail = "Fix the saved configuration and retry."
+            self.connection_tone = "error"
+            return
+        try:
+            self.status = self.manager.status()
+        except UI_ERRORS as exc:
             self.refresh_error = self.redact(str(exc))
             return
-        self.status = status
-        self.linger = linger
-        self.logs = self.redact(logs)
-        self.refresh_error = ""
+        try:
+            self.linger = self.manager.linger_status()
+        except UI_ERRORS as exc:
+            # Persistence diagnostics do not invalidate a current startup record.
+            self.linger_error = self.redact(str(exc))
+        self._update_connection()
+
+    def _update_connection(self):
+        mode = self.config.settings.mode
+        active = self.status.get("ActiveState", "")
+        load = self.status.get("LoadState", "")
+        prefix = "Configured" if self.connection_url else "URL unavailable"
+        if load in {"error", "bad-setting", "masked"} or active == "failed":
+            self.connection_state = prefix + " - service failed"
+            self.connection_detail = "Inspect [l] Logs before retrying the service."
+            self.connection_tone = "error"
+            return
+        if load == "not-found" or active == "inactive":
+            self.connection_state = prefix + " - not running"
+            self.connection_detail = (
+                "Start the service to use this configured address."
+                if self.connection_url
+                else "Start the service to obtain a new quick tunnel URL."
+            )
+            self.connection_tone = "muted"
+            return
+        if not active:
+            return
+        self.connection_state = (
+            "Waiting for tunnel URL"
+            if mode == "quick"
+            else "Configured - startup unverified"
+        )
+        self.connection_detail = "Waiting for a current startup record; [l] Logs."
+        if active != "active":
+            return
+        try:
+            pid = int(self.status.get("MainPID") or "0")
+            if pid <= 0:
+                return
+            url = startup_url(self.config, self.config_path, expected_pid=pid)
+        except UI_ERRORS:
+            # Missing, stale or mismatched records must never retain an old URL.
+            return
+        self.connection_url = url
+        self.connection_verified = True
+        self.connection_tone = "ok"
+        self.connection_state = (
+            "Startup verified" if mode == "local" else "Tunnel started"
+        )
+        self.connection_detail = (
+            "MCP startup check passed. This address is local to the service host."
+            if mode == "local"
+            else "MCP startup and initial tunnel connection passed; public reachability is untested."
+        )
+
+    def link_text(self) -> str:
+        """Expose the authorized MCP link, with an exact plain-text export command."""
+        return "\n".join(
+            [
+                self.connection_url or self.connection_state,
+                "",
+                "Copy as one line:",
+                self._command("link", "--config", str(self.config_path)),
+                "",
+                "The command prints the full URL without inserted line breaks.",
+                "State: " + self.connection_state,
+            ]
+        )
 
     def _command(self, *arguments: str) -> str:
         return shlex.join([os.path.abspath(sys.executable), "-m", "kt_mcp", *arguments])
@@ -207,9 +288,15 @@ class TerminalController:
                 "e enables boot. d only disables future automatic startup; "
                 "it does not stop a running service."
             ),
-            "c explicitly displays client credentials. v shows details without credentials.",
+            "The home screen shows the MCP link. u opens the link and its one-line export command.",
+            "Up/Down/PgUp/PgDn scroll long home-screen links. c opens client JSON.",
+            "v shows details without credentials; l keeps credentials redacted in logs.",
             "q quits this panel and leaves the service unchanged. Uppercase keys also work.",
-            "State is reported by systemd. Use l to check MCP startup.",
+            (
+                "State is the systemd process state. Startup verified / Tunnel started "
+                "requires a matching startup record; it is not a continuous health check."
+            ),
+            "Local/named links can be copied before startup; a configured link does not mean it is running.",
             (
                 "Existing configurations keep their saved workspace; "
                 "changing your shell directory does not reconfigure the service."
@@ -277,15 +364,19 @@ class TerminalController:
             ("Boot", self.status.get("UnitFileState") or "unknown"),
             ("Linger", self.linger),
             ("Connection mode", settings.mode),
+            ("Connection state", self.connection_state),
+            ("Startup evidence", self.connection_detail),
             ("Local HTTP port", str(settings.port)),
         ]
         if settings.public_origin:
             fields.append(("Public HTTPS origin", settings.public_origin))
         if self.refresh_error:
             fields.append(("Status unavailable", self.refresh_error))
+        if self.linger_error:
+            fields.append(("Linger unavailable", self.linger_error))
         lines = [f"{label}: {value}" for label, value in fields]
         lines.extend(
-            ["", "State describes the systemd process; check logs for MCP startup."]
+            ["", "Startup evidence does not confirm ongoing or public reachability."]
         )
         return self.redact("\n".join(lines))
 
@@ -322,13 +413,57 @@ class TerminalController:
             self.note = "Linger enabled: the user service can survive logout."
         elif key == "l":
             return "Service logs", self.redact(self.manager.logs(200))
-        elif key == "c":
-            self.config = load_config(self.config_path)
+        elif key in {"u", "c"}:
+            self.refresh()
+            if key == "u":
+                return "MCP link", self.link_text()
+            if not self.connection_url:
+                raise ValueError(
+                    "No current MCP link; start the service and check logs."
+                )
             return (
                 "Client configuration - contains credentials; share only with trusted clients",
-                client_configuration(client_url(self.config, self.config_path)),
+                client_configuration(self.connection_url),
             )
         return None
+
+
+def _styles() -> dict[str, int]:
+    """Use terminal colors when available, retaining emphasis in monochrome."""
+    import curses
+
+    plain = {
+        "normal": 0,
+        "muted": curses.A_DIM,
+        "title": curses.A_BOLD,
+        "link": curses.A_BOLD,
+        "ok": curses.A_BOLD,
+        "warning": curses.A_BOLD,
+        "error": curses.A_BOLD,
+    }
+    try:
+        if not curses.has_colors():
+            return plain
+        curses.start_color()
+        curses.use_default_colors()
+        # wrapper() starts color support even for NO_COLOR. Reset pair zero
+        # before opting out so the terminal retains its own foreground/background.
+        if "NO_COLOR" in os.environ:
+            return plain
+        colors = (
+            ("title", curses.COLOR_CYAN),
+            ("link", curses.COLOR_CYAN),
+            ("ok", curses.COLOR_GREEN),
+            ("warning", curses.COLOR_YELLOW),
+            ("error", curses.COLOR_RED),
+        )
+        styled = dict(plain)
+        for pair, (role, foreground) in enumerate(colors, 1):
+            curses.init_pair(pair, foreground, -1)
+            styled[role] |= curses.color_pair(pair)
+        return styled
+    except curses.error:
+        return plain
 
 
 def _put(screen, row, column, text, attribute=0):
@@ -348,6 +483,7 @@ def _put(screen, row, column, text, attribute=0):
 def _popup(screen, title: str, body: str):
     import curses
 
+    styles = _styles()
     offset = 0
     screen.timeout(-1)
     try:
@@ -357,7 +493,7 @@ def _popup(screen, title: str, body: str):
             lines = wrap_display(body, width - 4) if width >= 6 else []
             offset = max(0, min(offset, max(0, len(lines) - page)))
             screen.erase()
-            _put(screen, 0, 1, title, curses.A_BOLD)
+            _put(screen, 0, 1, title, styles["title"])
             if height < 4 or width < 6:
                 _put(screen, 1, 0, "Resize terminal; q returns.")
             else:
@@ -383,6 +519,7 @@ def _popup(screen, title: str, body: str):
 def _screen(screen, controller: TerminalController):
     import curses
 
+    styles = _styles()
     try:
         curses.curs_set(0)
     except curses.error:
@@ -390,13 +527,15 @@ def _screen(screen, controller: TerminalController):
     screen.keypad(True)
     screen.timeout(250)
     next_refresh = 0.0
+    link_offset = 0
+    previous_link = None
     while True:
         if time.monotonic() >= next_refresh:
             controller.refresh()
             next_refresh = time.monotonic() + 2
         height, width = screen.getmaxyx()
         screen.erase()
-        _put(screen, 0, 1, "Kohaku KT MCP | Linux service manager", curses.A_BOLD)
+        _put(screen, 0, 1, "Kohaku KT MCP", styles["title"])
         if height < 18 or width < 64:
             _put(screen, 2, 1, "Resize terminal to at least 64 x 18. Press q to quit.")
         else:
@@ -409,7 +548,7 @@ def _screen(screen, controller: TerminalController):
                 controller.redact(controller.manager.unit_name),
                 available - display_width("Unit: " + suffix),
             )
-            _put(screen, 1, 2, f"Unit: {unit}{suffix}")
+            _put(screen, 1, 2, f"Unit: {unit}{suffix}", styles["muted"])
             state = status.get("ActiveState") or "unknown"
             if status.get("SubState"):
                 state += "/" + status["SubState"]
@@ -418,7 +557,13 @@ def _screen(screen, controller: TerminalController):
                 f" Restarts: {status.get('NRestarts') or '?'}"
             )
             state = ellipsize(state, available - display_width("State: " + suffix))
-            _put(screen, 2, 2, controller.redact(f"State: {state}{suffix}"))
+            _put(
+                screen,
+                2,
+                2,
+                controller.redact(f"State: {state}{suffix}"),
+                styles[controller.connection_tone] | curses.A_BOLD,
+            )
             boot = status.get("UnitFileState") or "unknown"
             _put(
                 screen,
@@ -437,47 +582,64 @@ def _screen(screen, controller: TerminalController):
                 screen,
                 5,
                 2,
-                "Config: "
-                + ellipsize(
-                    controller.redact(str(controller.config_path)), available - 8
-                ),
+                "MCP link | " + controller.connection_state,
+                styles[controller.connection_tone] | curses.A_BOLD,
             )
-            _put(screen, 6, 2, f"Mode: {config.mode}   Local port: {config.port}")
-            _put(
-                screen,
-                7,
-                2,
-                "State tracks systemd; use [l] Logs to verify MCP startup.",
-            )
+            # This is the intentionally visible credential area. Never ellipsize
+            # a URL or pass it through general-purpose diagnostic redaction.
+            link = controller.connection_url
+            if link != previous_link:
+                link_offset = 0
+                previous_link = link
+            link_lines = wrap_display(link or "No current link.", available)
+            link_page = height - 11
+            link_offset = max(0, min(link_offset, max(0, len(link_lines) - link_page)))
+            for row, line in enumerate(
+                link_lines[link_offset : link_offset + link_page], 6
+            ):
+                _put(screen, row, 2, line, styles["link" if link else "muted"])
+            link_hint = "[u] Link view and one-line export"
+            if len(link_lines) > link_page:
+                link_hint = (
+                    f"Lines {link_offset + 1}-{link_offset + link_page}/{len(link_lines)}"
+                    " | Up/Down/PgUp/PgDn scroll | [u] Export"
+                )
+            _put(screen, height - 5, 2, link_hint, styles["muted"])
             action, persistence = next_steps(
                 status,
                 linger=controller.linger,
                 system=controller.manager.system,
                 error=controller.refresh_error,
             )
-            _put(screen, 8, 2, action, curses.A_BOLD)
-            _put(screen, 9, 2, persistence)
-            service_actions = "[s] Start  [x] Stop  [r] Restart"
-            if not controller.manager.system:
-                service_actions = "[i] Install/start  " + service_actions
-            _put(screen, 10, 2, service_actions)
-            boot_actions = "[e] Enable boot   [d] Disable boot"
-            if not controller.manager.system:
-                boot_actions += "   [g] Enable linger"
-            _put(screen, 11, 2, boot_actions)
-            _put(screen, 12, 2, "[l] Logs  [c] Client JSON  [v] Details  [?] Help")
-            _put(screen, 13, 2, "[q] Quit panel (service keeps its current state)")
-            _put(screen, 14, 2, "Recent service log", curses.A_BOLD)
-            for row, line in enumerate(
-                controller.logs.splitlines()[-(height - 16) :], 15
-            ):
-                _put(screen, row, 2, line)
+            _put(screen, height - 4, 2, action, curses.A_BOLD)
+            _put(
+                screen,
+                height - 3,
+                2,
+                persistence
+                or (
+                    "Local access only."
+                    if config.mode == "local"
+                    else "Public reachability is not checked."
+                ),
+                styles["muted"],
+            )
+            _put(
+                screen,
+                height - 2,
+                2,
+                "[u] Link [l] Logs [v] Details [?] Help [q] Quit panel",
+            )
             _put(
                 screen,
                 height - 1,
                 1,
-                controller.redact(controller.refresh_error or controller.note)
-                or "Press ? for help; v shows full paths.",
+                controller.redact(
+                    controller.refresh_error
+                    or controller.note
+                    or controller.linger_error
+                ),
+                styles["warning"],
             )
         screen.refresh()
         key = screen.getch()
@@ -485,10 +647,19 @@ def _screen(screen, controller: TerminalController):
             return
         if height < 18 or width < 64:
             continue
+        if key in (curses.KEY_DOWN, curses.KEY_UP, curses.KEY_NPAGE, curses.KEY_PPAGE):
+            movement = {
+                curses.KEY_DOWN: 1,
+                curses.KEY_UP: -1,
+                curses.KEY_NPAGE: link_page,
+                curses.KEY_PPAGE: -link_page,
+            }
+            link_offset += movement[key]
+            continue
         if key < 0 or key > 255:
             continue
         character = chr(key).lower()
-        if character not in "isxredglcv?":
+        if character not in "isxredglcuv?":
             continue
         previous_note = controller.note
         if character not in "v?":

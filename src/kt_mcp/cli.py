@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
         from kt_mcp.tui import main as tui_main
 
         return tui_main([])
-    if argv and argv[0] in {"init", "daemon", "client-config"}:
+    if argv and argv[0] in {"init", "daemon", "client-config", "link"}:
         from kt_mcp.daemon import main as daemon_main
 
         return daemon_main(argv)
@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Kohaku KT MCP: standalone workspace tools derived from KohakuTerrarium.",
         epilog=(
-            "Linux commands: init, daemon, client-config, service, tui. "
+            "Linux commands: init, daemon, link, client-config, service, tui. "
             "Use kt-mcp COMMAND --help for details. "
             "On Linux, no arguments in an interactive terminal opens the TUI. "
             "Use --transport stdio to force the MCP protocol, including in a terminal. "

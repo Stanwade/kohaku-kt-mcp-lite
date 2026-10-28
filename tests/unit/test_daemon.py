@@ -16,6 +16,7 @@ from kt_mcp.daemon import (
     default_config_path,
     load_config,
     save_config,
+    startup_url,
 )
 from kt_mcp.desktop import DesktopSettings
 
@@ -89,6 +90,21 @@ def test_readable_config_is_rejected(tmp_path, config, mode):
         {
             "mode": "named",
             "public_origin": "https://mcp.example.com/path",
+            "tunnel_token": "connector-token",
+        },
+        {
+            "mode": "named",
+            "public_origin": "https://mcp.\texample.com",
+            "tunnel_token": "connector-token",
+        },
+        {
+            "mode": "named",
+            "public_origin": "https://mcp.\x1bexample.com",
+            "tunnel_token": "connector-token",
+        },
+        {
+            "mode": "named",
+            "public_origin": "https://mcp.example.com\\unexpected",
             "tunnel_token": "connector-token",
         },
     ],
@@ -180,6 +196,83 @@ def test_quick_client_url_requires_live_current_status(tmp_path, config, monkeyp
     monkeypatch.setattr(module.os, "kill", missing_process)
     with pytest.raises(ValueError, match="not ready"):
         client_url(config, path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process liveness checks")
+@pytest.mark.parametrize("mode", ["local", "named", "quick"])
+def test_startup_record_must_belong_to_the_selected_service(
+    tmp_path, config, monkeypatch, mode
+):
+    config = replace(
+        config,
+        settings=replace(
+            config.settings,
+            mode=mode,
+            public_origin="https://mcp.example.com" if mode == "named" else "",
+        ),
+        tunnel_token="connector-token" if mode == "named" else "",
+    )
+    path = tmp_path / "config.json"
+    status_path = path.with_suffix(".status.json")
+    url = (
+        "https://test-daemon.trycloudflare.com/mcp/" + TOKEN
+        if mode == "quick"
+        else client_url(config, path)
+    )
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: None)
+    status_path.write_text(json.dumps({"pid": 12345, "url": url}), encoding="utf-8")
+
+    assert startup_url(config, path, expected_pid=12345) == url
+    with pytest.raises(ValueError, match="startup is not confirmed"):
+        startup_url(config, path, expected_pid=98765)
+
+    # A changed local port/domain/token must not reuse the previous URL as a
+    # confirmation that the edited configuration was loaded by the service.
+    changed = replace(config, token="changed-token-" + "b" * 32)
+    with pytest.raises(ValueError, match="startup is not confirmed"):
+        startup_url(changed, path, expected_pid=12345)
+    if mode != "quick":
+        settings_change = (
+            {"port": 9123}
+            if mode == "local"
+            else {"public_origin": "https://new.example.com"}
+        )
+        changed = replace(
+            config,
+            settings=replace(config.settings, **settings_change),
+        )
+        with pytest.raises(ValueError, match="startup is not confirmed"):
+            startup_url(changed, path, expected_pid=12345)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process liveness checks")
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://test-daemon.trycloudflare.com",
+        "https://user:password@test-daemon.trycloudflare.com",
+        "https://test-daemon.trycloudflare.com\\unexpected",
+        "https://test-daemon.\ttrycloudflare.com",
+        "https://test-daemon.\x1btrycloudflare.com",
+        "https://test-daemon.trycloudflare.com:invalid",
+        "https://test-daemon.trycloudflare.com/?next=",
+        "https://test-daemon.trycloudflare.com/#next=",
+    ],
+)
+def test_quick_status_rejects_non_copyable_or_credentialed_urls(
+    tmp_path, config, monkeypatch, base
+):
+    config = replace(config, settings=replace(config.settings, mode="quick"))
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: None)
+    path.with_suffix(".status.json").write_text(
+        json.dumps({"pid": 12345, "url": base + "/mcp/" + TOKEN}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="not ready") as error:
+        client_url(config, path)
+    assert TOKEN not in str(error.value)
+    assert base not in str(error.value)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux daemon lifecycle")

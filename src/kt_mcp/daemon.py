@@ -58,6 +58,11 @@ class DaemonConfig:
                 or origin.path
                 or origin.query
                 or origin.fragment
+                or "\\" in self.settings.public_origin
+                or any(
+                    character.isspace() or not character.isprintable()
+                    for character in self.settings.public_origin
+                )
             ):
                 raise ValueError("public_origin must be an HTTPS origin without a path")
             # Accessing port validates malformed or out-of-range values.
@@ -127,16 +132,16 @@ def load_config(path: Path) -> DaemonConfig:
     return config
 
 
-def client_url(config: DaemonConfig, path: Path) -> str:
-    settings = config.settings
-    if settings.mode == "local":
-        return f"http://127.0.0.1:{settings.port}/mcp/{config.token}"
-    if settings.mode == "named":
-        return f"{settings.public_origin}/mcp/{config.token}"
+def startup_url(
+    config: DaemonConfig, path: Path, *, expected_pid: int | None = None
+) -> str:
+    """Read a live daemon's matching startup record, without probing its endpoint.
+
+    The panel supplies its unit's MainPID so another process's record cannot
+    make that unit look ready. The record describes startup, not ongoing health.
+    """
     if os.name != "posix":
-        raise ValueError(
-            "quick daemon status requires POSIX; use the Windows desktop GUI"
-        )
+        raise ValueError("daemon startup status requires POSIX")
     try:
         status = json.loads(
             Path(path)
@@ -147,12 +152,56 @@ def client_url(config: DaemonConfig, path: Path) -> str:
         pid = status["pid"]
         if type(pid) is not int or pid <= 0:
             raise ValueError("invalid daemon PID")
+        if expected_pid is not None and (
+            type(expected_pid) is not int or pid != expected_pid
+        ):
+            raise ValueError("daemon PID does not match this service")
         os.kill(pid, 0)
         url = status["url"]
-        if not isinstance(url, str) or not url.endswith("/mcp/" + config.token):
+        if not isinstance(url, str) or any(
+            character.isspace() or not character.isprintable() for character in url
+        ):
+            raise ValueError("invalid daemon URL")
+        if config.settings.mode in {"local", "named"}:
+            if url != client_url(config, path):
+                raise ValueError("outdated daemon URL")
+        elif config.settings.mode == "quick":
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+                or parsed.path != "/mcp/" + config.token
+                or "\\" in url
+            ):
+                raise ValueError("invalid tunnel URL")
+            _ = parsed.port
+        else:
             raise ValueError("outdated daemon status")
         return url
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        raise ValueError(
+            "MCP startup is not confirmed; check the service logs"
+        ) from None
+
+
+def client_url(config: DaemonConfig, path: Path) -> str:
+    """Return a configured address, or the current quick tunnel's startup URL."""
+    settings = config.settings
+    if settings.mode == "local":
+        return f"http://127.0.0.1:{settings.port}/mcp/{config.token}"
+    if settings.mode == "named":
+        return f"{settings.public_origin}/mcp/{config.token}"
+    if os.name != "posix":
+        raise ValueError(
+            "quick daemon status requires POSIX; use the Windows desktop GUI"
+        )
+    try:
+        return startup_url(config, path)
+    except ValueError:
         raise ValueError(
             "quick tunnel is not ready; start the service and try again"
         ) from None
@@ -228,8 +277,12 @@ def main(argv: list[str]) -> int:
     init.add_argument("--mode", choices=("local", "quick", "named"), default="local")
     init.add_argument("--public-origin", default="")
     init.add_argument("--cloudflared", default="")
-    for name in ("daemon", "client-config"):
-        child = commands.add_parser(name)
+    for name, help_text in (
+        ("daemon", "Run the service in the foreground"),
+        ("client-config", "Print MCP client JSON"),
+        ("link", "Print the complete MCP URL on one line"),
+    ):
+        child = commands.add_parser(name, help=help_text)
         child.add_argument("--config", type=Path, default=default_config_path())
     args = parser.parse_args(argv)
     if sys.platform != "linux":
@@ -275,11 +328,12 @@ def main(argv: list[str]) -> int:
                 ["kt-mcp", "tui", "--config", str(args.config.expanduser().absolute())]
             )
             print(f"Next: {command}")
-            print("Press i to register/start the service, then c for client settings.")
+            print("Press i to start the service; the panel shows your MCP link.")
             return 0
-        if args.command == "client-config":
+        if args.command in {"client-config", "link"}:
             config = load_config(args.config)
-            print(client_configuration(client_url(config, args.config)))
+            url = client_url(config, args.config)
+            print(url if args.command == "link" else client_configuration(url))
             return 0
         return run_daemon(args.config)
     except (ValueError, OSError, TypeError) as exc:

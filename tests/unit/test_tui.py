@@ -1,6 +1,8 @@
 import json
 import os
+import shlex
 import sys
+from dataclasses import replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,8 +24,12 @@ TUNNEL_TOKEN = "private-cloudflare-tunnel-token"
 
 @pytest.fixture(autouse=True)
 def isolated_tokens(monkeypatch):
+    import curses
+
     monkeypatch.delenv("KT_MCP_TOKEN", raising=False)
     monkeypatch.delenv("TUNNEL_TOKEN", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(curses, "has_colors", lambda: False)
 
 
 class FakeManager:
@@ -100,7 +106,7 @@ def test_actions_are_explicit_systemd_operations(terminal):
 
 
 def test_quit_and_unknown_keys_never_stop_or_modify_service(terminal):
-    for key in ("q", "", "z", "\x1b"):
+    for key in ("q", "Q", "", "z", "\x1b"):
         assert terminal.controller.act(key) is None
     assert terminal.manager.calls == []
 
@@ -112,7 +118,7 @@ def test_system_panel_does_not_guess_installation_user(terminal):
     assert terminal.manager.calls == []
 
 
-def test_logs_and_default_text_redact_both_credentials(terminal):
+def test_logs_and_diagnostic_text_redact_both_credentials(terminal):
     terminal.manager.log_text = (
         f"Connection http://127.0.0.1:8765/mcp/{MCP_TOKEN}\n"
         f"Connector reported {TUNNEL_TOKEN}\n"
@@ -272,7 +278,7 @@ def active_status(**overrides):
         (active_status(ActiveState="inactive", SubState="dead"), ("[s]",)),
         (active_status(ActiveState="failed", SubState="failed"), ("[l]", "[r]")),
         (active_status(ActiveState="activating", SubState="start"), ("[l]",)),
-        (active_status(), ("[c]",)),
+        (active_status(), ("[x]", "[r]")),
     ],
     ids=["not-installed", "stopped", "failed", "starting", "active"],
 )
@@ -280,11 +286,8 @@ def test_next_steps_match_current_service_state(status, expected_keys):
     next_action, _ = module.next_steps(status, linger="yes")
 
     assert all(key in next_action.lower() for key in expected_keys)
-    if status["ActiveState"] == "active" and status["LoadState"] == "loaded":
-        assert "logs" in next_action.lower()
-        assert "mcp ready" not in next_action.lower()
-    else:
-        assert "[c]" not in next_action.lower()
+    assert "mcp ready" not in next_action.lower()
+    assert "[c]" not in next_action.lower()
 
 
 def test_missing_system_service_guidance_requires_an_explicit_run_user():
@@ -363,6 +366,8 @@ class RecordingScreen:
         self.width = width
         self.drawn = []
         self.frames = []
+        self.styled = []
+        self.style_frames = []
 
     def getmaxyx(self):
         return self.height, self.width
@@ -375,6 +380,7 @@ class RecordingScreen:
 
     def erase(self):
         self.drawn = []
+        self.styled = []
 
     def addnstr(self, row, column, text, limit, attribute=0):
         self.addstr(row, column, text[:limit], attribute)
@@ -383,9 +389,11 @@ class RecordingScreen:
         assert 0 <= row < self.height
         assert column + cjk_cells(text) < self.width, "text overflowed the terminal"
         self.drawn.append((row, column, text))
+        self.styled.append((row, column, text, attribute))
 
     def refresh(self):
         self.frames.append(list(self.drawn))
+        self.style_frames.append(list(self.styled))
 
     def getch(self):
         return next(self.keys)
@@ -417,7 +425,7 @@ def test_details_popup_wraps_chinese_and_spaces_without_losing_path_text():
     assert "".join(body_lines) == path
 
 
-def test_64_column_panel_preserves_the_workspace_name_at_the_end(
+def test_64_column_panel_shows_the_complete_link_and_workspace_name(
     terminal, tmp_path, monkeypatch
 ):
     import curses
@@ -439,7 +447,17 @@ def test_64_column_panel_preserves_the_workspace_name_at_the_end(
     texts = [text for _, _, text in screen.frames[-1]]
     assert any(text.rstrip().endswith("末尾项目") and "…" in text for text in texts)
     assert any("987654" in text for text in texts)
-    assert MCP_TOKEN not in "\n".join(texts)
+    url = "http://127.0.0.1:8765/mcp/" + MCP_TOKEN
+    assert url in "".join(texts)
+    assert TUNNEL_TOKEN not in "\n".join(texts)
+    assert not any(call[0] == "logs" for call in terminal.manager.calls)
+    assert "Recent service log" not in "\n".join(texts)
+    assert "[u] Link" in "\n".join(texts)
+    assert any(
+        attribute & curses.A_BOLD
+        for _, _, text, attribute in screen.style_frames[-1]
+        if text.startswith("http://")
+    )
 
 
 def test_failed_refresh_clears_old_running_state_and_redacts_the_error(
@@ -473,4 +491,350 @@ def test_failed_refresh_clears_old_running_state_and_redacts_the_error(
     assert terminal.controller.linger == "unknown"
     assert "manager unavailable" in terminal.controller.refresh_error
     assert MCP_TOKEN not in terminal.controller.refresh_error
-    assert MCP_TOKEN not in last_frame
+    assert terminal.controller.connection_state == "Status unknown"
+    assert not terminal.controller.connection_verified
+    assert terminal.controller.connection_url == (
+        "https://mcp.example.com/mcp/" + MCP_TOKEN
+    )
+    assert TUNNEL_TOKEN not in last_frame
+
+
+def set_mode(terminal, mode, *, token=MCP_TOKEN, origin="https://mcp.example.com"):
+    terminal.config = replace(
+        terminal.config,
+        settings=replace(
+            terminal.config.settings,
+            mode=mode,
+            public_origin=origin if mode == "named" else "",
+        ),
+        token=token,
+        tunnel_token=TUNNEL_TOKEN if mode == "named" else "",
+    )
+    save_config(terminal.config, terminal.path, replace=True)
+    if mode == "local":
+        return "http://127.0.0.1:8765/mcp/" + token
+    if mode == "named":
+        return origin + "/mcp/" + token
+    return "https://current-tunnel.trycloudflare.com/mcp/" + token
+
+
+def record_startup(terminal, url):
+    pid = os.getpid()
+    terminal.manager.status_data = active_status(MainPID=str(pid))
+    terminal.path.with_suffix(".status.json").write_text(
+        json.dumps({"pid": pid, "url": url}), encoding="utf-8"
+    )
+    return pid
+
+
+@pytest.mark.parametrize("mode", ["local", "named"])
+@pytest.mark.parametrize("state", ["stopped", "unknown"])
+def test_configured_link_is_visible_without_claiming_a_running_service(
+    terminal, monkeypatch, mode, state
+):
+    url = set_mode(terminal, mode)
+    if state == "unknown":
+
+        def unavailable():
+            raise module.ServiceError("user systemd is unavailable")
+
+        monkeypatch.setattr(terminal.manager, "status", unavailable)
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == url
+    assert not terminal.controller.connection_verified
+    assert terminal.controller.connection_tone != "ok"
+    if state == "unknown":
+        assert terminal.controller.connection_state == "Status unknown"
+    else:
+        assert "not running" in terminal.controller.connection_state.lower()
+    assert terminal.manager.calls == []
+
+
+@pytest.mark.parametrize("mode", ["local", "named", "quick"])
+def test_only_a_matching_active_startup_record_verifies_the_link(terminal, mode):
+    url = set_mode(terminal, mode)
+    record_startup(terminal, url)
+
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == url
+    assert terminal.controller.connection_verified
+    assert terminal.controller.connection_tone == "ok"
+    assert terminal.controller.connection_state == (
+        "Startup verified" if mode == "local" else "Tunnel started"
+    )
+    assert terminal.manager.calls == []
+
+
+@pytest.mark.parametrize("mode", ["local", "named"])
+def test_active_process_without_startup_record_is_not_verified(terminal, mode):
+    url = set_mode(terminal, mode)
+    terminal.manager.status_data = active_status(MainPID=str(os.getpid()))
+
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == url
+    assert not terminal.controller.connection_verified
+    assert terminal.controller.connection_tone != "ok"
+    assert "verified" not in terminal.controller.connection_state.lower().replace(
+        "unverified", ""
+    )
+
+
+@pytest.mark.parametrize("invalid", ["missing", "different-pid", "stopped", "failed"])
+def test_quick_link_is_never_reused_for_an_unconfirmed_service(terminal, invalid):
+    url = set_mode(terminal, "quick")
+    pid = record_startup(terminal, url)
+    terminal.controller.refresh()
+    assert terminal.controller.connection_url == url
+
+    if invalid == "missing":
+        terminal.path.with_suffix(".status.json").unlink()
+    elif invalid == "different-pid":
+        terminal.manager.status_data["MainPID"] = str(pid + 1)
+    else:
+        terminal.manager.status_data.update(
+            ActiveState="inactive" if invalid == "stopped" else "failed",
+            MainPID="0",
+        )
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == ""
+    assert not terminal.controller.connection_verified
+    assert terminal.controller.connection_tone != "ok"
+    title, body = terminal.controller.act("u")
+    assert title == "MCP link"
+    assert url not in body and MCP_TOKEN not in body
+
+
+def test_rotated_quick_token_clears_the_old_link(terminal):
+    old_url = set_mode(terminal, "quick")
+    record_startup(terminal, old_url)
+    terminal.controller.refresh()
+    assert terminal.controller.connection_verified
+    set_mode(terminal, "quick", token="replacement-token-" + "b" * 32)
+
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == ""
+    assert not terminal.controller.connection_verified
+    assert MCP_TOKEN not in terminal.controller.redact("old token: " + MCP_TOKEN)
+
+
+def test_status_failure_clears_a_previously_verified_quick_link(terminal, monkeypatch):
+    url = set_mode(terminal, "quick")
+    record_startup(terminal, url)
+    terminal.controller.refresh()
+
+    def unavailable():
+        raise module.ServiceError("manager failed: " + MCP_TOKEN)
+
+    monkeypatch.setattr(terminal.manager, "status", unavailable)
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == ""
+    assert terminal.controller.connection_state == "Status unknown"
+    assert not terminal.controller.connection_verified
+    assert terminal.controller.status == {}
+    assert MCP_TOKEN not in terminal.controller.refresh_error
+
+
+@pytest.mark.parametrize("mode", ["local", "quick"])
+def test_configuration_failure_does_not_keep_the_previous_link(terminal, mode):
+    url = set_mode(terminal, mode)
+    record_startup(terminal, url)
+    terminal.controller.refresh()
+    terminal.path.write_text("not valid JSON", encoding="utf-8")
+
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == ""
+    assert not terminal.controller.connection_verified
+    assert terminal.controller.status == {}
+
+
+def test_linger_query_failure_does_not_erase_verified_service_state(
+    terminal, monkeypatch
+):
+    url = set_mode(terminal, "local")
+    record_startup(terminal, url)
+
+    def unavailable():
+        raise module.ServiceError("loginctl unavailable")
+
+    monkeypatch.setattr(terminal.manager, "linger_status", unavailable)
+    terminal.controller.refresh()
+
+    assert terminal.controller.connection_url == url
+    assert terminal.controller.connection_verified
+    assert terminal.controller.status["ActiveState"] == "active"
+    assert terminal.controller.linger == "unknown"
+
+
+def test_refresh_does_not_query_logs_and_log_failure_preserves_service_state(
+    terminal, monkeypatch
+):
+    import curses
+
+    url = set_mode(terminal, "local")
+    record_startup(terminal, url)
+    queried = []
+    popups = []
+
+    def unavailable(lines):
+        queried.append(lines)
+        raise module.ServiceError(f"journal unavailable: {MCP_TOKEN} {TUNNEL_TOKEN}")
+
+    monkeypatch.setattr(terminal.manager, "logs", unavailable)
+    monkeypatch.setattr(curses, "curs_set", lambda visible: None)
+    monkeypatch.setattr(
+        module, "_popup", lambda screen, title, body: popups.append((title, body))
+    )
+    terminal.controller.refresh()
+    assert queried == []
+
+    module._screen(RecordingScreen([ord("l"), ord("q")]), terminal.controller)
+
+    assert queried == [200]
+    assert terminal.controller.connection_url == url
+    assert terminal.controller.connection_verified
+    assert terminal.controller.status["ActiveState"] == "active"
+    assert popups and "journal unavailable" in popups[-1][1]
+    assert MCP_TOKEN not in popups[-1][1]
+    assert TUNNEL_TOKEN not in popups[-1][1]
+
+
+def test_link_popup_is_read_only_and_exports_the_exact_quoted_configuration(
+    terminal, tmp_path
+):
+    path = tmp_path / "中文 config 'quoted' % ${HOME}.json"
+    save_config(terminal.config, path)
+    controller = TerminalController(terminal.manager, path)
+
+    title, body = controller.act("U")
+
+    url = "https://mcp.example.com/mcp/" + MCP_TOKEN
+    assert title == "MCP link"
+    assert body.split("\n\n", 1)[0] == url
+    assert "Copy as one line:" in body
+    command = body.split("Copy as one line:", 1)[1].strip().splitlines()[0]
+    assert shlex.split(command) == [
+        os.path.abspath(sys.executable),
+        "-m",
+        "kt_mcp",
+        "link",
+        "--config",
+        str(path),
+    ]
+    assert TUNNEL_TOKEN not in body
+    assert terminal.manager.calls == []
+
+
+@pytest.mark.parametrize("key", ["u", "l", "c", "v", "?"])
+def test_read_only_popups_restore_the_previous_note(terminal, monkeypatch, key):
+    import curses
+
+    note = "Earlier operation completed."
+    terminal.controller.note = note
+    monkeypatch.setattr(curses, "curs_set", lambda visible: None)
+    monkeypatch.setattr(module, "_popup", lambda *args: None)
+
+    module._screen(RecordingScreen([ord(key), ord("q")]), terminal.controller)
+
+    assert terminal.controller.note == note
+    assert not any(
+        call[0] in {"install", "control", "linger"} for call in terminal.manager.calls
+    )
+
+
+def test_long_link_can_be_scrolled_without_losing_any_url_characters(
+    terminal, monkeypatch
+):
+    import curses
+
+    # The configuration accepts an arbitrary HTTPS origin; no visual truncation
+    # may silently turn such a saved address into a different copyable value.
+    origin = (
+        "https://" + "".join(f"segment{number:02}." for number in range(80)) + "test"
+    )
+    url = set_mode(terminal, "named", token="z" * 128, origin=origin)
+    monkeypatch.setattr(curses, "curs_set", lambda visible: None)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 0)
+    screen = RecordingScreen([curses.KEY_NPAGE] * 10 + [ord("q")], height=18, width=64)
+
+    module._screen(screen, terminal.controller)
+
+    remaining = url
+    for frame in screen.frames:
+        for _, _, text in frame:
+            if text and remaining.startswith(text):
+                remaining = remaining[len(text) :]
+    assert remaining == "", "Scrolling did not expose the complete URL"
+    assert any(
+        all(fragment in text for fragment in ("Up/Down/PgUp/PgDn", "scroll", "[u]"))
+        for _, _, text in screen.frames[0]
+    )
+    assert not any(
+        call[0] in {"install", "control", "linger"} for call in terminal.manager.calls
+    )
+
+
+@pytest.mark.parametrize("no_color", [None, "", "1"])
+def test_monochrome_style_keeps_bold_without_color_pairs(monkeypatch, no_color):
+    import curses
+
+    if no_color is not None:
+        monkeypatch.setenv("NO_COLOR", no_color)
+        monkeypatch.setattr(curses, "has_colors", lambda: True)
+        monkeypatch.setattr(curses, "start_color", lambda: None)
+        monkeypatch.setattr(curses, "use_default_colors", lambda: None)
+
+    def unexpected_color(*args):
+        pytest.fail("monochrome mode must not initialize or select color pairs")
+
+    monkeypatch.setattr(curses, "init_pair", unexpected_color)
+    monkeypatch.setattr(curses, "color_pair", unexpected_color)
+
+    styles = module._styles()
+
+    assert styles["title"] & curses.A_BOLD
+    assert styles["link"] & curses.A_BOLD
+    assert all(attribute & curses.A_COLOR == 0 for attribute in styles.values())
+
+
+def test_color_styles_emphasize_the_link_and_semantic_states(monkeypatch):
+    import curses
+
+    monkeypatch.setattr(curses, "has_colors", lambda: True)
+    monkeypatch.setattr(curses, "start_color", lambda: None)
+    monkeypatch.setattr(curses, "use_default_colors", lambda: None)
+    monkeypatch.setattr(curses, "init_pair", lambda *args: None)
+    monkeypatch.setattr(curses, "color_pair", lambda index: index << 8)
+    monkeypatch.setattr(curses, "COLORS", 8, raising=False)
+    monkeypatch.setattr(curses, "COLOR_PAIRS", 64, raising=False)
+
+    styles = module._styles()
+
+    assert styles["link"] & curses.A_BOLD
+    assert styles["link"] & curses.A_COLOR
+    assert len({styles["ok"], styles["warning"], styles["error"]}) == 3
+
+
+def test_color_initialization_failure_falls_back_to_bold(monkeypatch):
+    import curses
+
+    def unavailable(*args):
+        raise curses.error("terminal rejected color initialization")
+
+    monkeypatch.setattr(curses, "has_colors", lambda: True)
+    monkeypatch.setattr(curses, "start_color", lambda: None)
+    monkeypatch.setattr(curses, "use_default_colors", lambda: None)
+    monkeypatch.setattr(curses, "init_pair", unavailable)
+    monkeypatch.setattr(curses, "COLORS", 8, raising=False)
+    monkeypatch.setattr(curses, "COLOR_PAIRS", 64, raising=False)
+
+    styles = module._styles()
+
+    assert styles["link"] & curses.A_BOLD
+    assert all(attribute & curses.A_COLOR == 0 for attribute in styles.values())

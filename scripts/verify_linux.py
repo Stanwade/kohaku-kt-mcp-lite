@@ -353,7 +353,38 @@ async def verify_connection(url, version):
         )
 
 
-def verify_tui(cli, config, name, *, cwd, environment, token):
+def terminal_attributes_at(captured, text):
+    """Check attributes where text was drawn in the first real terminal frame."""
+    position = captured.find(text.encode("utf-8"))
+    require(position >= 0, "installed TUI did not draw the expected label")
+    bold = False
+    foreground = None
+    for match in re.finditer(rb"\x1b\[([0-9;]*)m", captured[:position]):
+        parameters = iter(int(value or b"0") for value in match[1].split(b";"))
+        for value in parameters:
+            if value == 0:
+                bold, foreground = False, None
+            elif value == 1:
+                bold = True
+            elif value == 22:
+                bold = False
+            elif 30 <= value <= 37:
+                foreground = value - 30
+            elif 90 <= value <= 97:
+                foreground = value - 90 + 8
+            elif value == 39:
+                foreground = None
+            elif value in (38, 48):
+                mode = next(parameters, None)
+                color = tuple(
+                    next(parameters, None) for _ in range(3 if mode == 2 else 1)
+                )
+                if value == 38:
+                    foreground = color
+    return bold, foreground
+
+
+def verify_tui(cli, config, name, *, cwd, environment, url):
     import fcntl
     import pty
     import termios
@@ -362,13 +393,19 @@ def verify_tui(cli, config, name, *, cwd, environment, token):
     process = None
     try:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
+        terminal_environment = {
+            **environment,
+            "TERM": "xterm-256color",
+            "LC_ALL": "C.UTF-8",
+        }
+        terminal_environment.pop("NO_COLOR", None)
         process = subprocess.Popen(
             [str(cli), "tui", "--config", str(config), "--name", name],
             stdin=slave,
             stdout=slave,
             stderr=slave,
             cwd=cwd,
-            env={**environment, "TERM": "xterm-256color"},
+            env=terminal_environment,
             start_new_session=True,
         )
         os.close(slave)
@@ -384,9 +421,20 @@ def verify_tui(cli, config, name, *, cwd, environment, token):
                     break
         else:
             raise TimeoutError("installed TUI did not render")
+        plain = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", captured)
+        require(b"MCP link" in plain, "installed TUI did not label its MCP link")
         require(
-            token.encode("ascii") not in captured,
-            "default TUI exposed its access token",
+            url.encode("utf-8") in plain,
+            "installed TUI did not display the complete MCP link by default",
+        )
+        require(
+            terminal_attributes_at(captured, "MCP link")[0],
+            "installed TUI link heading is not bold",
+        )
+        bold, foreground = terminal_attributes_at(captured, url)
+        require(
+            bold and foreground is not None,
+            "installed TUI link did not use bold and color in the actual terminal",
         )
         os.write(master, b"q")
         require(process.wait(timeout=10) == 0, "installed TUI did not exit cleanly")
@@ -460,6 +508,14 @@ def verify(arguments, report, sensitive):
         token = json.loads(config.read_text(encoding="utf-8"))["token"]
         sensitive.append(token)
         url = f"http://127.0.0.1:{port}/mcp/{token}"
+        require(
+            command(
+                [cli, "link", "--config", config], cwd=root, environment=environment
+            )
+            == url + "\n",
+            "installed link export did not return one complete plain URL",
+        )
+        report["link_export"] = "passed; selected configuration returned one plain URL"
         name = "kt-mcp-verify-" + uuid.uuid4().hex[:12]
         process = None
         unit_path = None
@@ -543,7 +599,7 @@ def verify(arguments, report, sensitive):
                         name,
                         cwd=root,
                         environment=environment,
-                        token=token,
+                        url=url,
                     )
                     after = service_status()
                     require(
@@ -552,7 +608,10 @@ def verify(arguments, report, sensitive):
                         "exiting TUI changed the running service",
                     )
                     asyncio.run(verify_connection(url, version))
-                    report["tui"] = "passed; service PID unchanged and MCP reachable"
+                    report["tui"] = (
+                        "passed; default link and terminal styling checked; "
+                        "service PID unchanged and MCP reachable"
+                    )
                     service_logs = command(
                         [cli, "service", "logs", "--name", name, "--lines", "1000"],
                         cwd=root,

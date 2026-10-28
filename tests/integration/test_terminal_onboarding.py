@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -82,9 +83,42 @@ class TerminalSession:
     def send(self, value):
         os.write(self.master, value.encode("utf-8"))
 
-    def assert_hidden(self, value):
-        if value.encode("utf-8") in self.output:
+    def assert_hidden(self, value, *, since=0):
+        if value.encode("utf-8") in self.output[since:]:
             pytest.fail("A credential was echoed to the terminal", pytrace=False)
+
+    def assert_link_rendered(self, url, *, since=0):
+        """Check one view's captured rendering, allowing a URL to wrap.
+
+        This is intentionally not a current-frame or stale-state assertion.
+        State transitions are covered by controller tests.
+        """
+        plain = re.sub(
+            rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output[since:]
+        )
+        if url.encode("utf-8") not in re.sub(rb"\s+", b"", plain):
+            pytest.fail("The view did not render the complete MCP link", pytrace=False)
+
+    def assert_command_rendered(self, command, *, since):
+        plain = re.sub(
+            rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output[since:]
+        )
+        if command.encode("utf-8") not in plain:
+            pytest.fail(
+                "The link view did not show the correctly quoted export command",
+                pytrace=False,
+            )
+
+    def resize(self, rows, columns):
+        import fcntl
+        import signal
+        import struct
+        import termios
+
+        fcntl.ioctl(
+            self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0)
+        )
+        self.process.send_signal(signal.SIGWINCH)
 
     def attributes_at(self, text):
         """Read the actual SGR state at a label, rather than finding any SGR byte."""
@@ -292,6 +326,7 @@ def test_first_run_uses_current_directory_and_recovers_from_invalid_port(onboard
     assert terminal.attributes_at("Save?")[0]
     assert not config.exists()
     assert not config.parent.exists()
+    before_save = bytes(terminal.output)
 
     terminal.send("\n")
     terminal.expect("Quit panel")
@@ -300,7 +335,13 @@ def test_first_run_uses_current_directory_and_recovers_from_invalid_port(onboard
     assert settings["port"] == 9123
     assert settings["mode"] == "local"
     assert not config.with_suffix(".status.json").exists()
-    terminal.assert_hidden(settings["token"])
+    if settings["token"].encode("ascii") in before_save:
+        pytest.fail("Setup displayed its access token before saving", pytrace=False)
+    url = "http://127.0.0.1:9123/mcp/" + settings["token"]
+    terminal.assert_link_rendered(url)
+    assert terminal.attributes_at("MCP link")[0]
+    bold, color = terminal.attributes_at(url)
+    assert bold and color is not None
     terminal.send("q")
     terminal.finish()
 
@@ -402,7 +443,7 @@ def test_bare_terminal_command_enters_setup_and_cancels_without_writes(tmp_path)
         terminal.close()
 
 
-def test_narrow_panel_opens_details_and_help_without_exposing_credentials(tmp_path):
+def test_narrow_panel_keeps_help_and_details_credential_free(tmp_path):
     from kt_mcp.daemon import DaemonConfig, save_config
     from kt_mcp.desktop import DesktopSettings
 
@@ -410,8 +451,16 @@ def test_narrow_panel_opens_details_and_help_without_exposing_credentials(tmp_pa
     workspace.mkdir(parents=True)
     config = tmp_path / ("配置目录" * 8) / "私密配置.json"
     token = secrets.token_urlsafe(24)
+    tunnel_token = "test-only-tunnel-" + secrets.token_urlsafe(24)
     save_config(
-        DaemonConfig(DesktopSettings(str(workspace), mode="local"), token), config
+        DaemonConfig(
+            DesktopSettings(
+                str(workspace), mode="named", public_origin="https://mcp.example.com"
+            ),
+            token,
+            tunnel_token,
+        ),
+        config,
     )
     original = config.read_bytes()
     assert config.stat().st_mode & 0o077 == 0
@@ -429,10 +478,11 @@ def test_narrow_panel_opens_details_and_help_without_exposing_credentials(tmp_pa
     )
     try:
         terminal.expect("Quit panel")
-        for label in ("State:", "PID:", "Restarts:", "Boot:", "Linger:", "[v]", "[?]"):
+        for label in ("MCP link", "[u]", "[v]", "[?]"):
             if label.encode("utf-8") not in terminal.output:
                 pytest.fail(f"Narrow panel is missing {label}", pytrace=False)
 
+        details_start = len(terminal.output)
         terminal.send("v")
         terminal.expect("Service details")
         terminal.expect("Workspace")
@@ -440,22 +490,157 @@ def test_narrow_panel_opens_details_and_help_without_exposing_credentials(tmp_pa
         terminal.expect("项目目录")
         terminal.expect("配置目录")
         terminal.send("\x1b[6~")
-        terminal.expect("Local HTTP port: 8765")
+        # Curses may reuse the beginning of a label from the previous page.
+        terminal.expect("HTTP port: 8765")
+        for secret in (token, token[:12], token[-12:]):
+            terminal.assert_hidden(secret, since=details_start)
         terminal.send("\n")
+        terminal.expect("Quit panel")
 
+        help_start = len(terminal.output)
         terminal.send("?")
         terminal.expect("Panel help")
+        terminal.send("\x1b[6~")
         terminal.expect("q quits this panel")
+        for secret in (token, token[:12], token[-12:]):
+            terminal.assert_hidden(secret, since=help_start)
         terminal.send("\n")
         terminal.send("q")
         terminal.finish()
 
-        # Substantial pieces catch a secret even if a narrow popup wraps it.
-        for secret in (token, token[:12], token[-12:]):
+        # A tunnel credential must not appear even in the intended MCP link view.
+        for secret in (tunnel_token, tunnel_token[:12], tunnel_token[-12:]):
             terminal.assert_hidden(secret)
         if config.read_bytes() != original:
             pytest.fail("Viewing the panel changed its configuration", pytrace=False)
         assert not config.with_suffix(".status.json").exists()
+    finally:
+        terminal.close()
+        assert_unregistered(name, environment, systemd_available=systemd_available)
+
+
+def test_narrow_link_view_keeps_long_url_and_exports_the_selected_config(tmp_path):
+    from kt_mcp.daemon import DaemonConfig, save_config
+    from kt_mcp.desktop import DesktopSettings
+
+    workspace = tmp_path / "link project 中文"
+    workspace.mkdir()
+    config = tmp_path / "chosen config 中文.json"
+    token = secrets.token_urlsafe(96)
+    tunnel_token = "test-only-tunnel-" + secrets.token_urlsafe(24)
+    url = "https://mcp.example.com/mcp/" + token
+    save_config(
+        DaemonConfig(
+            DesktopSettings(
+                str(workspace), mode="named", public_origin="https://mcp.example.com"
+            ),
+            token,
+            tunnel_token,
+        ),
+        config,
+    )
+    original = config.read_bytes()
+    name = "kt-mcp-onboard-" + secrets.token_hex(6)
+    environment = terminal_environment(tmp_path)
+    systemd_available = unit_status(name, environment) is not None
+    assert_unregistered(name, environment, systemd_available=systemd_available)
+    terminal = TerminalSession(
+        ["tui", "--config", str(config), "--name", name],
+        cwd=workspace,
+        environment=environment,
+        rows=18,
+        columns=64,
+    )
+    try:
+        terminal.expect("Quit panel")
+        terminal.assert_link_rendered(url)
+        assert terminal.attributes_at("MCP link")[0]
+        bold, color = terminal.attributes_at("https://mcp.example.com/mcp/")
+        assert bold and color is not None
+
+        link_start = len(terminal.output)
+        terminal.send("u")
+        terminal.expect("Copy as one line:")
+        terminal.expect("Up/Down/PgUp/PgDn")
+        terminal.assert_link_rendered(url, since=link_start)
+        terminal.assert_hidden(tunnel_token)
+
+        # A wide second view lets us compare quoting and embedded spaces exactly,
+        # without treating a stripped history of cursor movements as a screen.
+        terminal.send("\n")
+        terminal.expect("Quit panel")
+        terminal.resize(30, 500)
+        command_start = len(terminal.output)
+        terminal.send("u")
+        terminal.expect("Copy as one line:")
+        terminal.expect("Up/Down/PgUp/PgDn")
+        command = shlex.join(
+            [
+                str(Path(sys.executable).absolute()),
+                "-m",
+                "kt_mcp",
+                "link",
+                "--config",
+                str(config),
+            ]
+        )
+        terminal.assert_command_rendered(command, since=command_start)
+        terminal.send("\n")
+        terminal.send("q")
+        terminal.finish()
+
+        result = subprocess.run(
+            shlex.split(command),
+            cwd=workspace,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode != 0 or result.stdout != (url + "\n").encode("utf-8"):
+            pytest.fail(
+                "The displayed export command did not return the selected link",
+                pytrace=False,
+            )
+        if result.stderr:
+            pytest.fail("Link export produced unexpected diagnostics", pytrace=False)
+        terminal.assert_hidden(tunnel_token)
+        if config.read_bytes() != original:
+            pytest.fail("Viewing a link changed its configuration", pytrace=False)
+        assert not config.with_suffix(".status.json").exists()
+    finally:
+        terminal.close()
+        assert_unregistered(name, environment, systemd_available=systemd_available)
+
+
+def test_no_color_panel_keeps_its_link_bold_without_foreground_color(tmp_path):
+    from kt_mcp.daemon import DaemonConfig, save_config
+    from kt_mcp.desktop import DesktopSettings
+
+    config = tmp_path / "config.json"
+    token = secrets.token_urlsafe(32)
+    save_config(
+        DaemonConfig(DesktopSettings(str(tmp_path), mode="local"), token), config
+    )
+    url = "http://127.0.0.1:8765/mcp/" + token
+    name = "kt-mcp-onboard-" + secrets.token_hex(6)
+    environment = terminal_environment(tmp_path)
+    environment["NO_COLOR"] = "1"
+    systemd_available = unit_status(name, environment) is not None
+    assert_unregistered(name, environment, systemd_available=systemd_available)
+    terminal = TerminalSession(
+        ["tui", "--config", str(config), "--name", name],
+        cwd=tmp_path,
+        environment=environment,
+    )
+    try:
+        terminal.expect("Quit panel")
+        terminal.assert_link_rendered(url)
+        assert terminal.attributes_at("MCP link")[0]
+        assert terminal.attributes_at(url) == (True, None)
+        terminal.send("q")
+        terminal.finish()
     finally:
         terminal.close()
         assert_unregistered(name, environment, systemd_available=systemd_available)
