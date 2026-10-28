@@ -46,19 +46,50 @@ def owned_services(tmp_path):
 
 
 def delayed_connector(tmp_path):
-    """Use actual child-process registration without a public tunnel or network."""
+    """Hold connector registration until the test explicitly releases it."""
     executable = tmp_path / "delayed-cloudflared"
     executable.write_text(
         "#!/usr/bin/python3\n"
-        "import time\n"
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "ready = Path(__file__).with_suffix('.ready')\n"
+        "release = Path(__file__).with_suffix('.release')\n"
         "print('https://startup-test.trycloudflare.com', flush=True)\n"
-        "time.sleep(8)\n"
+        "ready.write_text(str(os.getppid()))\n"
+        "deadline = time.monotonic() + 45\n"
+        "while not release.exists():\n"
+        "    if time.monotonic() >= deadline:\n"
+        "        raise SystemExit('Test connector was not released')\n"
+        "    time.sleep(0.05)\n"
         "print('Registered tunnel connection', flush=True)\n"
         "time.sleep(300)\n",
         encoding="utf-8",
     )
     executable.chmod(0o700)
     return executable
+
+
+def wait_for_connector(session, manager, connector):
+    """Wait for this daemon's connector, separately from UI drawing progress."""
+    marker = connector.with_suffix(".ready")
+
+    def pending_registration():
+        session.pump(0.1)
+        try:
+            daemon_pid = marker.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        status = manager.status()
+        return (
+            status.get("ActiveState") == "active"
+            and status.get("MainPID") == daemon_pid
+        )
+
+    wait_for(
+        pending_registration,
+        "The service connector did not reach its registration barrier",
+        timeout=20,
+    )
 
 
 def save_and_start(session, manager, workspace, *, connector=None):
@@ -178,14 +209,12 @@ def test_slow_new_instance_start_updates_progress_until_ready(tmp_path, owned_se
             original_threads = ui_thread_count(session)
             save_and_start(session, manager, workspace, connector=connector)
             require_live_progress(session)
-            require(
-                manager.status().get("ActiveState") == "active",
-                "The controlled slow service did not start",
-            )
+            wait_for_connector(session, manager, connector)
             require(
                 not ready_pid(manager, path),
-                "The controlled slow connector became ready before progress was tested",
+                "The connector became ready before registration was released",
             )
+            connector.with_suffix(".release").touch()
             session.expect("Instances", timeout=20)
             require(
                 bool(ready_pid(manager, path)), "Startup completion was not verified"
@@ -220,6 +249,7 @@ def test_startup_wait_can_end_while_the_service_continues(
             original_threads = ui_thread_count(session)
             save_and_start(session, manager, workspace, connector=connector)
             require_live_progress(session)
+            wait_for_connector(session, manager, connector)
             before = fingerprint(path)
             current = manager.status()
             require(
@@ -247,6 +277,7 @@ def test_startup_wait_can_end_while_the_service_continues(
                 and fingerprint(path) == before,
                 "Ending startup wait changed the running service or configuration",
             )
+            connector.with_suffix(".release").touch()
             wait_for(
                 lambda: ready_pid(manager, path),
                 "The service did not finish startup after ending the UI wait",
