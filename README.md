@@ -3,7 +3,7 @@
 KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI、Linux TUI / systemd 管理和 Cloudflare Tunnel 自动接入。
 
 Linux / Ubuntu 用户可用下方在线命令安装，或在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 手动下载安装包。首次使用按 [Ubuntu 指南](UBUNTU.md) 进入项目目录并运行 `kt-mcp`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
-Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.2.3 提供在线一键安装、有色终端引导、默认显示 MCP link 的 TUI、Linux 安装包、通用 Python wheel 和源码包。
+Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.2.4 增加 `kt-mcp update` 和 TUI 内的工作区、接入方式配置，继续提供在线安装、Linux 安装包、通用 Python wheel 和源码包。
 源码安装、客户端连接和自行打包的方法见下文。
 
 A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
@@ -36,9 +36,26 @@ kt-mcp
 安装管道只完成软件安装，工作区在后续首次启动向导中选择。向导用颜色和粗体突出提示与默认值，并显示启动命令时所在的目录：Enter 使用它，也可输入其他已有路径，输入错误可重试，保存前可返回修改或取消。已有配置会继续沿用保存的工作区。
 
 首次 TUI 向导建立配置后，按 `i` 注册并启动用户服务、开启 linger。紧凑主页默认显示**含 MCP 访问令牌的完整连接地址**；按 `u` 查看纯链接及当前配置的单行导出命令，`c` 仍可查看客户端 JSON，`l` 按需加载脱敏日志，`q` 退出且不改变服务状态。
+按 `o` **Configure** 可修改工作区、端口、接入方式及固定域名设置。面板先提醒并确认暂停 MCP，确认后停止服务再进入编辑；保存或取消后保持停止，按 `s` 启动。已有 MCP 访问令牌保留，修改工作区会同步更新 systemd 工作目录。
 只创建配置可以运行 `kt-mcp init`。脚本中明确指定 `kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
 
 命令行可用 `kt-mcp link`，独立配置用 `kt-mcp link --config /absolute/path/config.json`，输出完整单行 URL。local/named 的配置地址不代表服务已启动；quick 等待当前启动记录，未就绪或失效时不显示旧地址。启动验证不等于持续公网健康检查。主页长链接可滚动，日志和 Cloudflare Tunnel Token 继续脱敏；无色终端自动降级，`NO_COLOR=1 kt-mcp` 可关闭颜色并保留终端支持的粗体。
+
+后续升级只需：
+
+```bash
+kt-mcp update
+```
+
+`kt-mcp update --check` 只检查新版本。更新沿用当前安装目录和 Python，先校验下载并试装，再暂停正在运行的用户服务；安装或启动失败时恢复完整旧环境。原本停止的服务保持停止，配置和访问令牌保留。
+
+**从 v0.2.3 或更早版本首次升级**，旧 CLI 尚无 `update`，使用一次在线迁移入口：
+
+```bash
+curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash -s -- --update
+```
+
+自定义安装位置在末尾添加 `--prefix "/原安装目录"`。这条入口复用同一个更新器，自动处理用户服务；之后直接使用 `kt-mcp update`。
 
 其他安装方式：
 

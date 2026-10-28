@@ -51,7 +51,7 @@ kt-mcp
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-  bash -s -- --version 0.2.3 \
+  bash -s -- --version 0.2.4 \
     --prefix "$HOME/apps/kt-mcp" \
     --bin-dir "$HOME/.local/bin" \
     --python /usr/bin/python3
@@ -60,6 +60,8 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 | 选项 | 行为 |
 | --- | --- |
 | `--version VERSION` | 安装指定的 `X.Y.Z` 或 `vX.Y.Z`；省略时选择最新正式 Release |
+| `--update` | 更新原有托管安装，暂停并恢复原本运行的用户服务 |
+| `--name NAME` | 配合 `--update` 选择用户服务；通常可自动识别 |
 | `--prefix DIR` | 指定安装前缀，虚拟环境位于 `DIR/venv` |
 | `--bin-dir DIR` | 指定 `kt-mcp` 命令链接所在目录 |
 | `--python EXEC` | 指定 Python 3.10+ 的可执行路径或 PATH 中的名称；默认 `python3` |
@@ -74,7 +76,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 (
   set -o pipefail
   curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-    bash -s -- --version 0.2.3
+    bash -s -- --version 0.2.4
 )
 ```
 
@@ -82,7 +84,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 
 ### 手动下载发行包
 
-从同一个 Release 下载 `kt-mcp-0.2.3-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+从同一个 Release 下载 `kt-mcp-0.2.4-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
@@ -91,8 +93,8 @@ sha256sum --ignore-missing -c SHA256SUMS
 确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
 
 ```bash
-tar -xzf kt-mcp-0.2.3-linux.tar.gz
-cd kt-mcp-0.2.3-linux
+tar -xzf kt-mcp-0.2.4-linux.tar.gz
+cd kt-mcp-0.2.4-linux
 bash ./install.sh
 ```
 
@@ -111,27 +113,38 @@ bash scripts/install_linux.sh
 本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
 
 ```bash
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.2.3-py3-none-any.whl
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.2.4-py3-none-any.whl
 ```
 
 `--source` 只用于本地安装器，在线入口不接受它。
 
 ### 升级已有安装
 
-**已经注册并运行服务时**，使用原来的安装前缀，先停止服务、更新软件，再启动，让进程完整加载新版代码。默认用户服务和默认安装位置的在线升级示例：
+v0.2.4 起，在服务之外的普通用户终端运行：
 
 ```bash
-(
-  set -euo pipefail
-  kt-mcp service stop
-  curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
-  kt-mcp service start
-)
+kt-mcp update
+kt-mcp update --check                  # 只检查，不安装、不暂停服务
+kt-mcp update --version 0.2.4           # 指定正式版；不支持降级
+kt-mcp update --name kt-mcp-dev         # 选择要恢复运行的用户实例
 ```
 
-只有前一步成功才执行下一步。使用自定义安装位置或解释器时，在中间命令的 `bash -s --` 后传入与原安装一致的 `--prefix`、`--bin-dir`、`--python` 等选项。没有命令链接时，用安装器打印的绝对路径替代 `kt-mcp`。
+更新器根据**当前执行的 CLI 所属虚拟环境**识别安装，不依赖当前工作目录或后来改变的 XDG 默认目录。它沿用原 Python 和命令链接，不修改配置、访问令牌、unit、自启动或 linger。下载和校验、依赖准备及副本试装均在停服之前完成；随后备份完整旧环境、离线安装并验证。原来运行的用户服务会恢复启动，并通过本机 MCP 初始化核对版本；原来停止的服务保持停止。Quick Tunnel 重启后通常会产生新的公网地址，重新打开 TUI 或运行 `kt-mcp link` 获取。
 
-手动安装包升级时，在新包解压目录使用 `bash ./install.sh` 作为中间的安装命令；源码安装则在仓库根目录使用 `bash scripts/install_linux.sh`。自定义实例的启停沿用 `--name`，系统级服务沿用 `--system` 和所需管理权限；软件安装仍以服务运行的普通账户执行。配置、访问令牌和工作区继续沿用。
+安装、启动失败或正常中断时会恢复原虚拟环境，包括旧依赖和额外安装的包。恢复失败会保留备份及独立恢复入口，并打印准确的恢复命令；先解决提示中的问题，再执行它。若机器断电或进程被强制杀死，可在原安装前缀的 `.kt-mcp-update` 中找到 `worker.py`，用原 base Python 执行 `python3 -I /原安装前缀/.kt-mcp-update/worker.py --recover`（自定义 Python 要换成原解释器）。不要手动删除未完成事务的备份。
+
+**从 v0.2.3 或更早版本首次升级**：旧 CLI 没有 `update`，新在线入口可以直接调用新版更新器，完成相同的服务暂停与恢复：
+
+```bash
+curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh \
+  | bash -s -- --update
+```
+
+自定义安装必须追加原 `--prefix "/原安装目录"`；必要时追加 `--name kt-mcp-dev`。`--update` 保留现有命令链接，因此不与 `--bin-dir`、`--no-link` 同用。第一次迁移完成后，只需 `kt-mcp update`。
+
+自动更新面向安装器创建的普通用户安装。它会拒绝在目标 MCP 自身的工具进程里执行、无法确认 systemd 状态、有未知 unit 覆盖、或有其他共享该安装的运行中实例等情况。多个实例共享一套环境时，先停其他实例，再用 `--name` 选择更新后要启动的用户服务。运行中的**系统级服务**需要管理员先停服，软件更新仍由安装用户执行，之后再由管理员启动；自动更新不会请求 sudo。源码/editable 安装继续通过 Git/pip 更新。
+
+手动安装包仍可在解压目录运行 `bash ./install.sh`；源码安装可在仓库根目录运行 `bash scripts/install_linux.sh`。这两种低层安装方式需自行停服和重启，不提供事务恢复；不要与自动更新同时运行。
 
 升级既有虚拟环境时，Python 主/小版本必须一致；从 3.10 迁移至 3.12 等情况请使用新的 `--prefix`。手动创建、未由安装器标记的环境，可继续用该环境的 pip 升级，或选择新的安装前缀。
 
@@ -203,7 +216,7 @@ systemctl --user status kt-mcp.service
 | `kt-mcp service logs --follow` | 持续查看 journal 日志 |
 | `kt-mcp service uninstall` | 停止、取消自启动并移除本项目 unit；保留配置和工作区 |
 
-用户 unit 位于 `~/.config/systemd/user/kt-mcp.service`（遵循 `XDG_CONFIG_HOME`）。需要多个实例时，在所有管理命令中统一加 `--name kt-mcp-dev` 等 ASCII 名称，并为每个实例选择不同的配置文件和端口。重新生成已有不同内容的托管 unit 使用 `install --replace`；不会覆盖未标记为本项目生成的 unit。更新 unit 或软件后，显式运行 `kt-mcp service restart` 让运行中的进程加载新版本；`enable --now` 不会重启已在运行的服务。
+用户 unit 位于 `~/.config/systemd/user/kt-mcp.service`（遵循 `XDG_CONFIG_HOME`）。需要多个实例时，在所有管理命令中统一加 `--name kt-mcp-dev` 等 ASCII 名称，并为每个实例选择不同的配置文件和端口。重新生成已有不同内容的托管 unit 使用 `install --replace`；不会覆盖未标记为本项目生成的 unit。手动更新 unit 或软件后，显式运行 `kt-mcp service restart` 让运行中的进程加载新版本；`enable --now` 不会重启已在运行的服务。`kt-mcp update` 已包含其所管理的运行中用户服务的重启。
 
 也支持与传统服务器软件相同的系统级 unit。先以普通账户完成安装和初始化，再执行：
 
@@ -230,13 +243,18 @@ kt-mcp tui
 
 已有配置时直接打开面板并沿用保存的工作区；之后在 shell 中切换目录，不会改变该服务的工作区。按 `v` 可核对完整路径，需要独立配置时使用 `--config /absolute/path/config.json`；同时运行多个实例时还需不同的 `--name` 和端口。
 
-向导逐项检查工作区、端口和接入模式，输入有误会说明原因并让你重试。输入 `:back` 返回上一步并保留已填内容，`:q`、Ctrl+C 或 Ctrl+D 取消。最后会显示工作区的绝对路径、端口、接入模式及配置位置，按 Enter 保存；输入 `edit` 可从工作区开始修改。确认前不会写配置或启动服务，已有配置不会被覆盖。固定域名的 Tunnel Token 使用隐藏输入，摘要不显示令牌。
+**修改已有配置按 `o` Configure**。首先显示“MCP will stop and stay offline while you edit”，默认选择 No；确认后等待当前服务停止，再进入预填现有值的向导。可以改工作区、端口、quick/named/local 接入方式；named 模式还可改公网域名和隐藏输入的 Tunnel Token，Enter 保留原值。MCP 访问令牌不重新生成，保存文件保持原属主和 `0600` 权限。
+
+保存会同步更新 systemd 的工作目录并重新加载 unit，不改变自启动和 linger。**编辑期间保持停止，保存或取消后也保持停止；回到面板按 `s` 才启动**，并检查本机 MCP 连接。确认暂停之前取消则不改变服务状态。保存或 unit 更新失败时尝试恢复原配置和 unit；存在外部修改时拒绝覆盖并显示恢复状态。未注册服务时只编辑配置，之后按 `i` 注册/启动；检测到手工启动的 daemon 仍在运行时，先在原终端停止它再编辑。
+
+向导逐项检查工作区、端口和接入模式，输入有误会说明原因并让你重试。输入 `:back` 返回上一步并保留已填内容，`:q`、Ctrl+C 或 Ctrl+D 取消。最后会显示工作区的绝对路径、端口、接入模式及配置位置，按 Enter 保存；输入 `edit` 可从工作区开始修改。确认保存前不会写配置，首次初始化不会覆盖已有配置。固定域名的 Tunnel Token 使用隐藏输入，摘要不显示令牌。
 
 向导和面板使用颜色与粗体突出提示、默认值、地址和状态。无色终端自动降级；使用 `NO_COLOR=1 kt-mcp` 可关闭颜色，保留终端支持的粗体。面板使用 Python 标准库 curses，不需要 Tk 或桌面环境；通过 SSH 使用时需要分配终端，例如 `ssh -t user@host`。
 
 | 按键 | 操作 |
 | --- | --- |
 | `i` | 注册用户服务、启用 linger，并启用/启动服务 |
+| `o` | 确认暂停 MCP，编辑工作区、端口及接入方式；保存/取消后保持停止 |
 | `s` / `x` / `r` | 启动 / 停止 / 重启 |
 | `e` / `d` | 启用 / 取消自启动；不改变当前运行状态 |
 | `g` | 启用用户 linger |
@@ -287,7 +305,7 @@ kt-mcp client-config
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python scripts/build_linux.py
-.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.2.3-linux.tar.gz --systemd
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.2.4-linux.tar.gz --systemd
 ```
 
 构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。
