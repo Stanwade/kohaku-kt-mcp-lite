@@ -15,6 +15,7 @@
 - 普通 Start 与 `instance start` 都只注册并启动，不隐式启用自启动或 linger。完整安装选项单独选择；`install --now` 仍遵循 CLI 的 enable+start 语义。
 - 生命周期、自启动及卸载验证所选配置与 unit 绑定；CLI `service --name` 未传配置时沿用 unit 的真实配置路径。
 - CLI 增加 `instance configure`、`service configure`、客户端 JSON/stdio 与私有文件导出，以及 `update --recover`。
+- 修正 Windows 配置快照的时间戳比较，保留外部修改和文件替换检测。
 - 配置前确认暂停选中实例，保存或取消后保持停止，其他实例继续运行。共享安装仍须先在管理器停止其他活跃实例再更新。
 
 ## 验证

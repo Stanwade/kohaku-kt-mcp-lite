@@ -44,8 +44,10 @@ def _file_identity(info: os.stat_result) -> tuple[int, ...]:
 
 
 def _snapshot(path: Path) -> _ConfigSnapshot:
-    if path.is_symlink():
+    named = path.lstat()
+    if stat.S_ISLNK(named.st_mode):
         raise ValueError("Configuration must not be a symbolic link.")
+    named_identity = _file_identity(named)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -58,12 +60,16 @@ def _snapshot(path: Path) -> _ConfigSnapshot:
                 raise PermissionError("Configuration belongs to another account.")
         data = stream.read()
         identity = _file_identity(info)
+        # Windows may report different ctime values through fstat and lstat.
+        # Compare each complete snapshot through its own API, then bind the
+        # opened descriptor to the original path by the filesystem identity.
         if (
             _file_identity(os.fstat(stream.fileno())) != identity
-            or _file_identity(path.lstat()) != identity
+            or _file_identity(path.lstat()) != named_identity
+            or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
         ):
             raise ValueError("Configuration changed while it was being read; retry.")
-    return _ConfigSnapshot(data, identity, info.st_uid, info.st_gid)
+    return _ConfigSnapshot(data, named_identity, info.st_uid, info.st_gid)
 
 
 class ConfigEditor:

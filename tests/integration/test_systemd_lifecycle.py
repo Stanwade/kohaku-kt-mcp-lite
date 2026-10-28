@@ -77,11 +77,11 @@ def _quit_tui_in_terminal(path, name, expected_url):
                     output.extend(os.read(master, 65536))
                 except OSError:
                     break
-                if b"Quit panel" in output:
+                if b"[q] Quit" in output:
                     break
             if process.poll() is not None:
                 break
-        if b"Quit panel" not in output:
+        if b"[q] Quit" not in output:
             pytest.fail("The installed service panel did not render", pytrace=False)
         plain = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", output)
         if b"MCP link" not in plain or expected_url.encode("utf-8") not in plain:
