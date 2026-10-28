@@ -1,310 +1,216 @@
 # Kohaku KT MCP Lite
 
-KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI、Linux TUI / systemd 管理和 Cloudflare Tunnel 自动接入。
+面向 Linux 的独立 MCP 工具服务，提供文件读写、搜索和命令执行能力。可以为不同项目创建独立实例，在一个终端界面中统一管理工作区、端口、接入方式和后台服务。
 
-Linux / Ubuntu 用户可用下方在线命令安装，或在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 手动下载安装包。首次使用按 [Ubuntu 指南](UBUNTU.md) 进入项目目录并运行 `kt-mcp`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
-Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.3.2 增加 CLI/TUI 共用的实例删除，保留原生 TUI 新建、配置、完整操作菜单和界面内更新；CLI 与 TUI 共享管理操作，每个实例独立配置端口及接入方式；继续提供 `kt-mcp update`、在线安装、Linux 安装包、通用 Python wheel 和源码包。
-源码安装、客户端连接和自行打包的方法见下文。
+项目源自 [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium)，无需安装完整的 KohakuTerrarium，也不需要配置模型提供商或 API Key。命令为 `kt-mcp`，Python 包名为 `kohaku-kt-mcp`。
 
-A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
-The directory and executable are named `kt-mcp`; the Python distribution is `kohaku-kt-mcp`.
-No KohakuTerrarium installation, LLM provider, API key, Agent, or Studio is required.
+## 安装与启动
 
-## Ubuntu quick start
-
-在普通用户的终端中安装。新的 Ubuntu 环境先准备依赖：
+需要 Python 3.10+。TUI 和后台服务管理需要正在运行的 systemd；安装及日常使用以普通用户执行。以下依赖安装命令适用于 Ubuntu：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y curl python3 python3-venv bash coreutils ca-certificates
 ```
 
-一条命令安装最新正式版：
+安装最新正式版：
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
 ```
 
-默认命令链接位于 `$HOME/.local/bin/kt-mcp`。如果安装器打印了 `export PATH=...` 提示，在当前终端执行它。默认目录可以使用下面的命令；将 `/path/to/your/project` 换成希望 MCP 访问的已有项目目录：
+安装器校验发行包并创建独立 Python 虚拟环境。默认安装位置为 `${XDG_DATA_HOME:-$HOME/.local/share}/kt-mcp`，命令链接位于 `$HOME/.local/bin/kt-mcp`。如果提示命令不在 `PATH` 中，按安装器提示设置；默认目录可使用：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
+```
+
+安装完成后，进入希望 MCP 访问的已有项目目录：
+
+```bash
 cd -- /path/to/your/project
 kt-mcp
 ```
 
-安装管道只完成软件安装。在不同项目目录运行 `kt-mcp` 时，会按目录的真实路径选择已有实例；首次进入一个新目录时，向导创建独立配置，推荐一个未被占用或预留的端口。Enter 使用默认值，也可修改工作区、端口及 local/quick/named 接入方式，保存前可返回修改或取消。重复进入同一目录会选中同一个实例。
+将示例路径替换为实际目录。首次进入新目录会打开配置向导，填写工作区、端口和接入方式；再次在同一目录运行，会选中已有实例。在其他项目目录运行同一命令，可以创建其他实例。
 
-运行 `kt-mcp tui` 查看全部用户实例，用上下键选择，Enter 进入详情。总览和详情都提供 **`n` 新建、`a` 全部操作、`b` 实例列表、`D` 删除所选实例**。新建在原生表单中填写名称、工作区、端口及接入方式，保存后可选择立即启动；普通 `s` 与 CLI `instance start` 一致，只注册并启动，不隐式开启自启动或 linger。`a` 菜单可选择安装参数、自启动、linger、卸载服务、删除实例、日志、导出、系统服务授权和软件更新。详细面板显示**含 MCP 访问令牌的完整连接地址**；`u` / `c` 查看链接或客户端 JSON，视图内按 `w` 保存完整文件；`l` 可跟随脱敏日志并选择条数。`q` 返回或退出，后台服务继续运行。
-按 `o` **Configure** 可修改选中实例的工作区、端口、接入方式及固定域名设置。面板先提醒并确认暂停该实例，确认后停止它再进入编辑；保存或取消后保持停止，按 `s` 启动，其他实例继续运行。已有 MCP 访问令牌保留，修改工作区会同步更新 systemd 工作目录。Review 中选择 `advanced` 可配置 cloudflared 路径和文件工具访问范围；保存冲突会保留输入并允许修改。完整入口对照见 [CLI/TUI 功能矩阵](docs/TUI_PARITY.md)。
-删除实例可在总览或详情按大写 `D`（Shift+D），或选择 **Actions → Delete instance (remove configuration)**。确认默认为 No；确认后只停止并卸载所选服务，删除它的配置和运行状态，实例从列表中消失，**workspace 中的项目文件保留**。`Uninstall service (keep configuration)` 仍保留配置，实例还会显示在列表中。命令行入口是 `kt-mcp instance delete 名称`；脚本显式传 `--yes` 可跳过确认。小写 `d` 仍是取消自启动。
+也可以直接打开统一管理界面，在界面内新建实例：
 
-也可直接创建两个实例（项目路径必须已存在）：
+```bash
+kt-mcp tui
+```
+
+固定版本、自定义安装目录、手动安装包和源码安装见 [Linux 详细指南](UBUNTU.md)。
+
+## 在 TUI 中管理实例
+
+总览显示各实例的状态、端口、接入方式和工作区。使用上下键选择，Enter 打开详情。总览和详情都可新建实例或打开操作菜单，空列表也可直接新建。
+
+| 入口 | 操作 |
+| --- | --- |
+| `n` | 新建实例，配置名称、工作区、端口和接入方式 |
+| `a` | 打开 **Actions** 完整操作菜单 |
+| `b` | 返回实例列表 |
+| `s` / `x` / `r` | 启动 / 停止 / 重启所选实例 |
+| `o` | 修改所选实例的配置 |
+| `u` | 查看或导出完整 MCP 连接地址 |
+| `c` | 查看或导出 HTTP 客户端 JSON |
+| `l` | 查看日志，可调整条数和跟随输出 |
+| `D`（Shift+D）或 Delete | 删除所选实例 |
+| `d`（详情页） | 取消自动启动 |
+| `?` | 查看帮助 |
+| `q` | 返回上层；在总览中退出 |
+
+**Actions** 还提供安装或重建服务、自启动设置、用户 linger、卸载服务、HTTP/stdio 客户端配置导出、实例列表导出、前台会话、服务详情和软件更新。通过 **Open / create configuration** 可以打开指定配置文件，选择用户服务或系统服务；系统服务操作需要管理员授权。
+
+新建实例后可选择立即启动。普通 **Start** 只注册并启动所选服务，不会自动开启自启动或 linger。需要开机启动并在退出 SSH 后继续运行时，在 Actions 中分别启用 **Enable automatic startup** 和 **Enable user linger**。linger 作用于当前用户的服务管理器。
+
+退出 TUI 不会停止 systemd 后台服务；通过 **Run foreground session** 启动的前台会话，则在退出该会话时停止。
+
+### 修改配置
+
+按 `o` 或选择 **Actions → Configure instance**。界面会先说明并确认暂停所选实例，默认选择 No；确认后停止该实例，再进入配置表单。
+
+可以修改工作区、端口、`local` / `quick` / `named` 接入方式，以及固定域名和 Tunnel Token。在保存确认页选择 `advanced`，还可设置 cloudflared 路径和文件工具访问范围。
+
+**保存或取消编辑后，实例都保持停止，需要按 `s` 重新启动。** 在暂停确认前取消则不改变服务状态。其他实例继续运行，已有 MCP 访问令牌保留。
+
+### 删除实例与卸载服务
+
+| 操作 | 服务 | 配置和访问令牌 | 工作区文件 |
+| --- | --- | --- | --- |
+| **Uninstall service (keep configuration)** | 停止并移除服务 | 保留，实例仍在列表中，可再次启动 | 保留 |
+| **Delete instance (remove configuration)** | 停止并移除服务 | 删除，同时移除运行状态和列表记录 | 保留 |
+
+删除可按 `D` 或 Delete，也可从 Actions 选择。确认界面会显示目标实例和配置路径，默认选择 No。删除实例不会删除远端 Cloudflare Tunnel 或 DNS 配置。
+
+## 接入 MCP 客户端
+
+每个实例独立保存工作区、端口、访问令牌和接入配置。不同实例使用不同端口；固定域名也需要分别配置。HTTP 服务监听本机 `127.0.0.1`，公网访问通过 Cloudflare Tunnel 接入。
+
+| 接入方式 | 用途与配置 |
+| --- | --- |
+| `local` | 仅本机 HTTP，使用 `http://127.0.0.1:端口/mcp/访问令牌` |
+| `quick` | 临时公网 HTTPS 地址，由 Cloudflare 分配，重启后可能变化 |
+| `named` | 固定域名，填写已有的 Cloudflare Tunnel Token 和公网域名 |
+
+`quick` 和 `named` 由实例管理 cloudflared 连接器；未找到连接器时自动下载并校验。固定域名模式需要先在 Cloudflare 配置 Tunnel 和公网路由，将服务地址指向该实例的 `http://127.0.0.1:端口`。kt-mcp 使用已有配置启动连接器，不代替 Cloudflare 创建账号、Tunnel 或 DNS 路由。
+
+### Streamable HTTP
+
+启动实例后，在 TUI 按 `u` 获取完整地址，或从 **Actions → Export HTTP client JSON** 导出客户端配置。在导出视图中按 `w` 可保存文件。命令行也可以读取：
+
+```bash
+kt-mcp instance link backend
+kt-mcp instance client-config backend
+```
+
+支持 `mcpServers` 格式的客户端可使用以下结构；将 URL 替换为实例的完整地址：
+
+```json
+{
+  "mcpServers": {
+    "kt-mcp": {
+      "url": "http://127.0.0.1:8765/mcp/your-access-token"
+    }
+  }
+}
+```
+
+完整 URL 包含访问令牌，无需额外的 Authorization 请求头。**持有该地址的客户端可以读写文件并执行命令，请只提供给可信客户端。** 接入 Quick Tunnel 的实例重启后，应重新获取地址。面板显示配置地址不等于公网路由已可用，连接问题可在日志中查看。
+
+### stdio
+
+使用本地管道的客户端，可以从 **Actions → Export stdio client JSON** 获取配置，由客户端启动并管理 MCP 进程，无需注册后台服务。
+
+手动配置时，使用实际的绝对路径，并显式指定 `--transport stdio`：
+
+```json
+{
+  "mcpServers": {
+    "kt-mcp": {
+      "command": "/home/your-user/.local/bin/kt-mcp",
+      "args": [
+        "--transport", "stdio",
+        "--workspace", "/absolute/path/to/project"
+      ]
+    }
+  }
+}
+```
+
+客户端配置位置和格式以所用客户端为准。stdio 的标准输出专用于 MCP 协议，日志写入标准错误。
+
+## 命令行管理
+
+CLI 与 TUI 使用相同的管理操作。需要脚本或自动化时，可以直接使用命令行；以下示例中的工作区必须已经存在，端口必须可用：
 
 ```bash
 kt-mcp instance create frontend --workspace /srv/frontend --port 8765 --mode local --start
 kt-mcp instance create backend --workspace /srv/backend --port 8766 --mode quick --start
 kt-mcp instance list
-kt-mcp instance link backend
-kt-mcp tui
+kt-mcp instance stop backend
+kt-mcp instance start backend
 ```
 
-每个实例独立保存工作区、端口、MCP 访问令牌、接入配置和运行状态。端口和固定域名冲突会被拒绝。Quick Tunnel 的地址由 Cloudflare 分配；需要固定地址时，为实例选择 named 模式并配置对应域名和 Tunnel。旧的默认配置自动纳入列表，并沿用已注册的服务名。
+其他常用操作：
 
-原有单配置接口继续可用：只创建配置可以运行 `kt-mcp init`。脚本中明确指定 `kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
+| 命令 | 操作 |
+| --- | --- |
+| `kt-mcp tui --instance backend` | 打开指定实例的管理面板 |
+| `kt-mcp instance configure backend` | 暂停实例并修改配置 |
+| `kt-mcp instance restart backend` | 重启实例 |
+| `kt-mcp instance uninstall backend` | 卸载服务，保留配置 |
+| `kt-mcp instance delete backend` | 确认后删除实例，保留工作区文件 |
+| `kt-mcp instance list --json` | 导出不含令牌的实例列表 |
+| `kt-mcp instance --help` | 查看实例命令帮助 |
+| `kt-mcp service --help` | 查看服务、自启动和日志等管理命令 |
 
-命名实例使用 `kt-mcp instance link 名称`；旧默认实例使用 `kt-mcp link`，显式配置使用 `kt-mcp link --config /absolute/path/config.json`，输出完整单行 URL。local/named 的配置地址不代表服务已启动；quick 等待当前启动记录，未就绪或失效时不显示旧地址。启动验证不等于持续公网健康检查。主页长链接可滚动，日志和 Cloudflare Tunnel Token 继续脱敏；无色终端自动降级，`NO_COLOR=1 kt-mcp` 可关闭颜色并保留终端支持的粗体。
+非交互脚本删除实例时，必须显式添加 `--yes`。指定配置文件和系统级服务的用法见 [Linux 详细指南](UBUNTU.md)。
 
-从 v0.3.1 起，可以在 `a` → **Software updates** 中检查、选择版本、安装及恢复中断更新；成功后自动重载新版 TUI。命令行仍可执行：
+## 更新
+
+在 TUI 中打开 **Actions → Software updates**，可以检查更新、选择正式版本、安装更新或恢复中断的更新。更新成功后自动重新加载 TUI。
+
+命令行入口：
 
 ```bash
-kt-mcp update
+kt-mcp update --check     # 只检查，不安装
+kt-mcp update             # 安装最新正式版
+kt-mcp update --recover   # 恢复中断的更新
 ```
 
-`kt-mcp update --check` 只检查新版本，`kt-mcp update --recover` 恢复保留的中断事务。更新沿用当前安装目录和 Python，先校验下载并试装，再暂停正在运行的用户服务；安装或启动失败时恢复完整旧环境。原本停止的服务保持停止，配置和访问令牌保留。
+自动更新适用于安装器创建的普通用户安装，由原安装用户执行。更新先下载、校验并准备依赖，再暂停关联的运行中用户服务；成功后恢复该服务，原本停止的服务保持停止。配置和访问令牌保留，安装或启动失败时尝试恢复旧环境。
 
-**从 v0.2.3 或更早版本首次升级**，旧 CLI 尚无 `update`，使用一次在线迁移入口：
+**多个实例共享同一套程序版本。** 更新前先在管理界面停止其他共享该安装的运行实例，再在更新菜单选择关联服务；更新器不会自动停止其他实例。运行中的系统服务也需要先通过系统管理面板停止，更新后由管理员启动。源码安装及旧版安装迁移见 [Linux 详细指南](UBUNTU.md)。
 
-```bash
-curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash -s -- --update
-```
+## MCP 工具与权限
 
-自定义安装位置在末尾添加 `--prefix "/原安装目录"`。这条入口复用同一个更新器，自动处理用户服务；之后直接使用 `kt-mcp update`。
-
-其他安装方式：
-
-- 已有源码 checkout：在仓库根目录执行 `bash scripts/install_linux.sh`。
-- 手动发行包：校验并解压后，在包目录执行 `bash ./install.sh`。仓库根目录的同名 `install.sh` 则是在线下载入口。
-
-固定版本、自定义安装目录、自动化调用的外层 `pipefail`、升级及服务配置见 [Ubuntu 指南](UBUNTU.md)。
-
-## Quick start
-
-Python 3.10+ is required. From this directory on Windows:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\kt-mcp.exe --workspace 'E:\Agent Project\KohakuTerrarium'
-```
-
-The protocol transport defaults to **stdio**. A client using pipes launches the server and owns its lifetime; protocol stdout remains reserved for MCP messages and logs go to stderr.
-On Linux only, running `kt-mcp` with no arguments and interactive stdin **and** stdout selects or creates an instance for the current directory. `kt-mcp tui` opens the unified instance manager. Use `kt-mcp --transport stdio` to explicitly select the protocol even in a terminal or a PTY-based client. Explicit arguments, non-interactive calls, and Windows keep their existing command-line behavior.
-
-On Linux/macOS, use `.venv/bin/python` and `.venv/bin/kt-mcp` instead.
-
-## 桌面 GUI 与 Cloudflare Tunnel
-
-安装后运行桌面版（Windows 无终端窗口）：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\kt-mcp-gui.exe
-```
-
-也可以双击项目目录中的 [`start-gui.cmd`](start-gui.cmd)，或运行
-`.\.venv\Scripts\python.exe -m kt_mcp.gui`。
-桌面版使用 Python 自带的 Tkinter，无需额外安装 GUI 库。Linux 的 Python 可能需要通过系统包管理器安装 `python3-tk`。
-
-1. 选择需要开放给 MCP 客户端的工作目录，设置本机 HTTP 端口。
-2. 选择接入方式，点击「启动服务」。首次需要 Tunnel 且未安装 `cloudflared` 时，自动从
-   [Cloudflare 官方 GitHub Release](https://github.com/cloudflare/cloudflared/releases/latest)
-   下载当前平台的可执行文件并核对发布资产的 SHA256。也可指定已有的 `cloudflared` 文件。
-3. 启动完成后点击「复制地址」或「复制客户端 JSON（含令牌）」，粘贴至支持
-   Streamable HTTP 的客户端。完整地址为 `/mcp/<访问令牌>`，无需额外设置请求头。
-4. 点击「停止」或关闭窗口，会关闭本实例的 HTTP 服务、工具任务和 Tunnel。
-
-| 接入方式 | 行为 |
+| 工具 | 功能 |
 | --- | --- |
-| 临时公网地址（默认） | 不需要 CF 账号，自动创建 `https://随机名称.trycloudflare.com/mcp/<访问令牌>`，识别地址并配置精确的 Host/Origin 白名单 |
-| 固定域名 | 使用已有的 Cloudflare Tunnel Token 启动连接器，公网域名填写 `https://mcp.example.com`（不含 `/mcp`） |
-| 仅本机 HTTP | 不启动 Tunnel，使用 `http://127.0.0.1:端口/mcp/<访问令牌>` |
+| `read` | 读取带行号的 UTF-8 文本，支持偏移和行数限制 |
+| `write` | 原子创建或替换文件；替换已有文件前需先读取 |
+| `edit` | 精确文本替换；匹配不唯一时需明确选择全部替换 |
+| `multi_edit` | 对一个文件依次替换，全部成功后一次写入 |
+| `glob` | 按相对路径模式查找文件 |
+| `grep` | 使用 Python 正则表达式搜索文本 |
+| `tree` | 查看有深度和条数限制的目录结构 |
+| `bash` | 在工作区运行 Bash 命令 |
+| `python` | 在独立 Python 子进程中执行代码，变量不跨调用保留 |
+| `job_status` | 查询单个任务或保留的任务列表 |
+| `job_wait` | 等待后台任务结果；等待超时不会终止任务 |
+| `job_cancel` | 取消任务并清理其进程 |
 
-**固定域名的首次配置：**在 Cloudflare 控制台创建一个远程管理的 Tunnel，复制连接器 Token，
-并将公网域名的服务路由配置为 `http://127.0.0.1:8765`（端口与 GUI 一致）。将域名与 Token 填入 GUI 即可。
-GUI 自动运行已有连接器；不代替控制台创建账号、Tunnel 或 DNS 路由。若启用 Cloudflare Access，还需在客户端完成相应认证。
+文件工具默认限制在所选工作区内；修改已有文件前需要先 `read`，文件被外部修改后需要重新读取。`multi_edit` 仅保证单个文件内的原子修改。
 
-临时 Tunnel 重启会更换地址，没有可用性保证，适合测试；固定地址请使用固定域名模式。
-参见 [Cloudflare Quick Tunnels 文档](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)。
-HTTP 服务继续仅监听 `127.0.0.1`，通过完整 URL 路径中的 MCP 访问令牌鉴权；桌面版启动时用实际 MCP 初始化请求检查本机服务和公网 Host/Origin 配置，
-并等待连接器注册成功。该检查不保证公网 DNS、Cloudflare Access 或固定域名路由配置正确；状态和连接器输出会显示在日志中。
-网络短暂中断时由 `cloudflared` 自行重连；连接器退出时，GUI 报错并停止本实例的 HTTP 服务，可修正配置后重新启动。
+**Bash 和 Python 命令没有沙箱隔离，具有服务运行账户的文件系统、环境和网络权限。** 工作区路径限制仅适用于文件工具。建议使用能访问目标项目的普通账户运行服务。
 
-非敏感设置保存到 Windows 的 `%LOCALAPPDATA%\Kohaku KT MCP\desktop.json`；自动下载的连接器位于同目录的 `bin`。
-Linux/macOS 使用 `$XDG_DATA_HOME/kt-mcp` 或 `~/.local/share/kt-mcp`。
-MCP 访问令牌和 Tunnel Token **不写入设置文件**，并会从界面日志中遮盖；客户端连接地址栏会显示含访问令牌的完整 URL。
-未设置 `KT_MCP_TOKEN` 时，每次打开 GUI 都会生成新的访问令牌，需要重新复制客户端配置；
-也可自行填写稳定的 MCP 令牌，或通过 `KT_MCP_TOKEN` 环境变量提供。
-Tunnel Token 可在界面填写，或使用 `TUNNEL_TOKEN` 环境变量预填；运行连接器时通过环境变量传递，不放在进程命令行中。
-复制的地址和客户端 JSON 均包含访问令牌。该令牌允许文件修改和命令执行，仅向可信客户端提供。
+文件工具支持不超过 2 MiB 的 UTF-8 文本，命令和读取输出上限为 64 KiB。单次命令超时上限为 300 秒；后台任务需要通过 `job_status` 或 `job_wait` 收集结果。服务停止会清理其任务进程，任务和文件读取状态不跨服务重启保留。
 
-## Nuitka Windows 单文件打包
+## 文档与许可
 
-使用路径访问令牌的 Windows x64 成品位于 `dist/KT-MCP-path-token.exe`，直接双击启动，不需要在目标电脑安装 Python。
-同目录的 `KT-MCP-path-token.exe.sha256` 用于校验文件。构建使用 Nuitka onefile、Tkinter 插件和 MSVC，禁用控制台窗口。
-构建脚本默认输出 `dist/KT-MCP.exe`；重新构建前需关闭正在运行的同名 EXE，以便覆盖文件。
+- [Linux 详细指南](UBUNTU.md)：安装选项、服务配置、更新恢复和故障排查。
+- [发行版本](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases)：安装包及校验文件。
+- [许可证](LICENSE)与 [NOTICE](NOTICE)：许可条款和来源说明。
 
-重新构建（需要 Windows x64、Python 3.12+ 和带 C++ 工具的 Visual Studio）：
-
-```powershell
-python -m venv .venv-build
-.\.venv-build\Scripts\python.exe -m pip install -e '.[bundle]'
-.\.venv-build\Scripts\python.exe scripts/build_onefile.py
-```
-
-构建脚本从 python.org 下载并按固定 SHA256 校验 CPython 3.13.17 embeddable 运行时，然后封装进同一个 EXE。
-单文件版的 `python` 工具首次调用时将该运行时释放到应用数据目录的 `runtimes`，使用独立 Python 子进程执行代码；
-支持标准库和工作目录内的 Python 模块，不继承构建机器的虚拟环境或第三方包。
-`bash` 工具仍需要目标电脑安装 Bash / Git for Windows；`cloudflared` 保留自动检测、首次下载及校验功能。
-编译中间文件与报告保存在 `dist/nuitka`，发布时只需要发送 `dist/KT-MCP.exe`。
-
-打包后的全工具验收可运行 `.\.venv\Scripts\python.exe scripts/verify_onefile.py --executable dist/KT-MCP-path-token.exe`。
-省略 `--executable` 时，默认验收构建脚本输出的 `dist/KT-MCP.exe`。
-脚本把 EXE 复制到包含空格和中文的临时目录，用独立配置和不含 Python 的 PATH 启动测试窗口。
-EXE 的专用 `--verify-onefile` 入口会自动调用同一套 GUI 启停逻辑，脚本通过真实 MCP 客户端测试全部 12 个工具和错误分支，
-随后自动关闭测试窗口并检查端口释放。报告保存到 `dist/onefile-smoke.json`。
-加上 `--tunnel` 可使用真实临时隧道，通过公网 HTTPS 运行同一套验收，结果保存到 `dist/onefile-smoke-tunnel.json`。
-验收需要测试环境安装项目依赖和 Bash / Git for Windows，不会修改日常 GUI 配置或用户工作区。
-
-## Connect a local client
-
-Use the executable's absolute path and an explicit workspace. See
-[`examples/client.stdio.json`](examples/client.stdio.json) for an MCP client configuration:
-
-```json
-{
-  "mcpServers": {
-    "kt-mcp": {
-      "command": "E:\\Agent Project\\kt-mcp\\.venv\\Scripts\\kt-mcp.exe",
-      "args": ["--workspace", "E:\\Agent Project\\KohakuTerrarium"]
-    }
-  }
-}
-```
-
-The exact settings location depends on your client. This example uses the common `mcpServers`
-JSON format; adapt it to clients with a different configuration format.
-
-## Streamable HTTP
-
-HTTP listens on **127.0.0.1 only** and authenticates the exact `/mcp/<access-token>` path.
-Generate a random token and keep it in the server's environment:
-
-```powershell
-$env:KT_MCP_TOKEN = & .\.venv\Scripts\python.exe -c 'import secrets; print(secrets.token_urlsafe(32))'
-.\.venv\Scripts\kt-mcp.exe --workspace 'E:\Agent Project\KohakuTerrarium' --transport http --port 8765
-```
-
-Configure the client to use `http://127.0.0.1:8765/mcp/<the value of KT_MCP_TOKEN>`.
-No Authorization header is required. The full URL is the access credential.
-Tokens must contain 32–128 URL-safe characters (`A-Z`, `a-z`, `0-9`, `_`, or `-`).
-The generated token above meets this format. This MVP uses a pre-shared secret;
-it does not implement OAuth discovery or login. Missing or incorrect token paths return HTTP 404.
-
-```json
-{
-  "mcpServers": {
-    "kt-mcp": {
-      "url": "http://127.0.0.1:8765/mcp/<your-access-token>"
-    }
-  }
-}
-```
-
-For access from another machine, supply your own HTTPS reverse proxy and set
-`--public-origin https://your-domain.example` so Host and Origin checks accept that exact origin.
-Forward the complete request path to the loopback port. The CLI does not create
-or supervise tunnels; the desktop GUI above manages Cloudflare Tunnel automatically.
-Server access logs are disabled and the token path is redacted before MCP dispatch.
-Keep the full URL out of proxy access logs as well. Stop the foreground HTTP server with Ctrl+C.
-
-## Tools
-
-| Tool | MVP behavior |
-| --- | --- |
-| `read(path, offset=0, limit=2000)` | UTF-8 text with line numbers; offset is zero-based |
-| `write(path, content)` | Atomic creation or full replacement; existing files require a prior read |
-| `edit(path, old_string, new_string, replace_all=false)` | Exact replacement; ambiguous matches fail |
-| `multi_edit(path, edits)` | Ordered exact replacements in one file; all succeed before one commit |
-| `glob(pattern, path=".", limit=200)` | File discovery with shell-style matching against relative paths |
-| `grep(pattern, path=".", glob="**/*", ignore_case=false, limit=100)` | Python regex search with line numbers |
-| `tree(path=".", depth=3, limit=200)` | Bounded directory listing |
-| `bash(command, timeout=60, run_in_background=false)` | Bash subprocess in the workspace |
-| `python(code, timeout=60, run_in_background=false)` | Fresh Python subprocess; variables do not persist |
-| `job_status(job_id?)` | Get one job or list retained jobs |
-| `job_wait(job_id, timeout=10)` | Wait up to 60 seconds; a wait timeout leaves execution running |
-| `job_cancel(job_id)` | Cancel a command and await process cleanup |
-
-Results contain structured JSON and a matching text block. Command results include `output`,
-`exit_code`, and `truncated`. Foreground failures set MCP `isError`; a background failure is
-reported in the job's `state` and `result`. Background jobs have no automatic completion reply.
-Use `job_status` or `job_wait` to collect their results.
-
-Existing files require a content baseline from `read` (a successful write also establishes one).
-If contents change externally, modifications fail until the file is reread. `multi_edit` is atomic
-for one file; it is not a transaction across files. File operations are serialized within an
-instance. External writers can still race between the final content check and the atomic rename.
-
-## Scope and limits
-
-- One workspace per process. Start separate processes for separate workspaces.
-- File tools resolve relative paths against that workspace and reject paths outside it by default,
-  including symlink targets outside it. `--allow-outside-workspace` explicitly relaxes this check.
-- **Commands are not sandboxed**: Bash/Python have the server user's filesystem, environment,
-  and network permissions. The workspace restriction applies to file tools, not commands.
-  A token grants all of these capabilities; use it only with trusted clients.
-- File tools support UTF-8 text only, up to 2 MiB per file. No image/PDF/notebook handling.
-- Command and read output is capped at 64 KiB. Command timeouts are 0 < timeout <= 300 seconds.
-- Search skips symlinks, `.git`, `.venv`, `venv`, `node_modules`, and `__pycache__`, scans at most
-  10,000 entries, and does not load `.gitignore`. Narrow the search when the scan limit is reached.
-  Glob matching uses Python `fnmatch` on whole relative paths (`*` may match `/`), with `**/`
-  also matching root files; it is not a full Git/ripgrep glob implementation.
-- Bash requires Bash on PATH; on Windows, Git Bash is preferred. Python uses the server's interpreter.
-- Up to 8 concurrent commands and 64 retained jobs. Oldest completed jobs are evicted first.
-  Shutdown cancels owned commands; jobs, file read state, and results are lost on restart.
-  Clients share that state. Do not retry a side effect automatically after losing its reply.
-- No workspace registry, persistent sessions, Agent/subagent delegation, plugins,
-  ngrok supervision, or outbound MCP client manager in this MVP.
-  The desktop GUI owns one HTTP server and an optional Cloudflare connector while its window is open.
-  Linux can instead run the headless daemon under a user or system systemd unit; terminal sessions
-  do not own that service. See [Ubuntu service management](UBUNTU.md).
-
-## Extraction map
-
-This is a reduced standalone implementation, not a drop-in replacement for `kt mcp-serve`.
-The original repository remains unchanged.
-
-| KohakuTerrarium source | Standalone equivalent |
-| --- | --- |
-| `api/mcp_tools.py` | `server.py`, `catalog.py`: MCP tool listing, dispatch, HTTP composition |
-| `api/auth/mcp_secret.py` | `auth.py`: exact secret-path gating at `/mcp/<access-token>` |
-| `mcp_server/runtime.py`, `core/executor.py` | `runtime.py`, `jobs.py`: minimal direct dispatch and job ownership |
-| `builtins/tools/{read,write,edit,multi_edit}.py`, `utils/file_guard.py` | `files.py`: text tools, content guards, atomic replacement |
-| `builtins/tools/{glob,grep,tree}.py` | `search.py`: bounded file discovery |
-| `builtins/tools/{bash,python,bash_windows}.py` | `processes.py`: subprocesses and Git Bash discovery |
-| `cli/mcp_serve.py`, `serving/mcp.py` | `cli.py`: foreground serving with stdio or authenticated HTTP |
-
-The MCP transport stays on the [official SDK's v1 API](https://py.sdk.modelcontextprotocol.io/v1/)
-with `mcp<2` pinned, matching the KT source generation. Runtime dependencies are the MCP SDK,
-Starlette, Uvicorn, and HTTPX, plus their transitive dependencies. The desktop GUI uses Tkinter.
-
-## Development
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m black --check src tests
-.\.venv\Scripts\python.exe -m ruff check src tests
-.\.venv\Scripts\python.exe -m build
-```
-
-Unit tests cover guards, search limits, jobs, processes, authentication, schemas, and CLI validation.
-Integration tests launch the actual CLI and use the official MCP client over stdio and HTTP.
-They require no model or credentials and use only temporary workspaces.
-
-## License and attribution
-
-Derived from KohakuTerrarium 2.1.6, copyright 2024–2026 Shih-Ying Yeh (KohakuBlueLeaf) and contributors.
-Licensed under the [KohakuTerrarium License 1.0](LICENSE). See [NOTICE](NOTICE) for the standalone changes.
-The project retains Kohaku branding and visible attribution to
-[KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
+源自 KohakuTerrarium 2.1.6，版权归 2024–2026 Shih-Ying Yeh（KohakuBlueLeaf）及贡献者所有。遵循 KohakuTerrarium License 1.0，并保留 Kohaku 品牌及来源署名。
