@@ -1,4 +1,5 @@
 import json
+import socket
 import stat
 import subprocess
 import sys
@@ -35,7 +36,7 @@ def installation(tmp_path, monkeypatch):
         pw_dir=str(tmp_path / "home"),
     )
     monkeypatch.setattr(module, "_account", lambda system, run_as: account)
-    monkeypatch.setattr(module.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(module.os, "geteuid", lambda: config_path.stat().st_uid)
     calls = []
 
     def run(arguments, **kwargs):
@@ -212,7 +213,8 @@ def test_install_now_enables_and_linger_is_explicit(installation):
     manager.install(installation.path, now=True, linger=True)
     commands = [call[0] for call in installation.calls]
     assert commands[1] == ["loginctl", "--no-ask-password", "enable-linger", "tester"]
-    assert commands[2][-3:] == ["enable", "--now", manager.unit_name]
+    assert commands[-1][-3:] == ["enable", "--now", manager.unit_name]
+    assert any("show" in command for command in commands)
     assert not any(command[0] == "sudo" for command in commands)
 
 
@@ -256,7 +258,7 @@ def test_mutations_require_correct_user_and_scope(installation, monkeypatch):
     monkeypatch.setattr(module.os, "geteuid", lambda: 0)
     with pytest.raises(PermissionError, match="non-root"):
         installation.manager.install(installation.path)
-    monkeypatch.setattr(module.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(module.os, "geteuid", lambda: installation.account.pw_uid)
     with pytest.raises(PermissionError, match="root"):
         ServiceManager(system=True).install(installation.path, run_as="tester")
     with pytest.raises(ValueError, match="user services"):
@@ -358,3 +360,64 @@ def test_cli_supports_common_options_and_explicit_enable(installation, capsys):
 def test_cli_status_returns_json(installation, capsys):
     assert module.main(["status"]) == 0
     assert set(json.loads(capsys.readouterr().out)) == set(module.STATUS_PROPERTIES)
+
+
+def test_start_refuses_another_instances_reserved_port_but_stop_remains_possible(
+    installation,
+):
+    from kt_mcp.instances import config_path
+
+    manager = installation.manager
+    manager.install(installation.path)
+    other_workspace = installation.root / "other"
+    other_workspace.mkdir()
+    other = DaemonConfig(
+        DesktopSettings(
+            str(other_workspace), installation.config.settings.port, "local"
+        ),
+        "other-instance-token-" + "b" * 32,
+    )
+    save_config(other, config_path("other"))
+    installation.calls.clear()
+
+    with pytest.raises(ValueError, match="[Pp]ort"):
+        manager.control("start")
+    assert not any("start" in call[0] for call in installation.calls)
+
+    manager.control("stop")
+    assert installation.calls[-1][0][-2:] == ["stop", manager.unit_name]
+
+
+def test_saved_service_credentials_are_not_replaced_by_the_invoking_shell(
+    installation, monkeypatch
+):
+    from kt_mcp import instances
+
+    monkeypatch.setenv("KT_MCP_TOKEN", "invalid-shell-token")
+    monkeypatch.setenv("TUNNEL_TOKEN", "unrelated-shell-tunnel")
+    monkeypatch.setattr(instances, "_socket_available", lambda port: True)
+    manager = installation.manager
+    manager.install(installation.path)
+    manager.control("start")
+    assert installation.calls[-1][0][-2:] == ["start", manager.unit_name]
+    assert TOKEN not in manager.unit_path.read_text()
+    assert "invalid-shell-token" not in manager.unit_path.read_text()
+    assert json.loads(installation.path.read_text())["token"] == TOKEN
+
+
+def test_start_refuses_an_occupied_socket_before_requesting_systemd(installation):
+    manager = installation.manager
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        config = DaemonConfig(
+            DesktopSettings(installation.config.settings.workspace, port, "local"),
+            TOKEN,
+        )
+        save_config(config, installation.path, replace=True)
+        manager.install(installation.path)
+        installation.calls.clear()
+        with pytest.raises(ValueError, match="[Pp]ort"):
+            manager.control("start")
+        assert not any("start" in call[0] for call in installation.calls)

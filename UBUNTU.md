@@ -43,7 +43,7 @@ cd -- /path/to/your/project
 kt-mcp
 ```
 
-将示例路径替换为实际项目目录。也可显式运行 `kt-mcp tui`。首次向导会显示启动时的当前目录作为默认工作区，Enter 使用它，也可输入其他已有目录；保存前可以检查和修改。安装目录和 MCP 工作目录可以完全不同。已有配置继续使用其保存的工作区，切换 shell 目录不会改变已配置服务的工作区。
+将示例路径替换为实际项目目录。`kt-mcp` 按当前目录的真实路径选择实例；该目录还没有实例时，向导创建独立配置，默认工作区就是当前目录，并推荐可用端口。保存前可以检查和修改。安装目录和 MCP 工作目录可以完全不同。在另一个项目目录运行同一命令可以创建第二个实例；已运行的实例继续使用自己的工作区。显式运行 `kt-mcp tui` 则进入统一实例列表。
 
 ### 在线安装选项与自动化
 
@@ -51,7 +51,7 @@ kt-mcp
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-  bash -s -- --version 0.2.4 \
+  bash -s -- --version 0.3.0 \
     --prefix "$HOME/apps/kt-mcp" \
     --bin-dir "$HOME/.local/bin" \
     --python /usr/bin/python3
@@ -76,7 +76,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 (
   set -o pipefail
   curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-    bash -s -- --version 0.2.4
+    bash -s -- --version 0.3.0
 )
 ```
 
@@ -84,7 +84,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 
 ### 手动下载发行包
 
-从同一个 Release 下载 `kt-mcp-0.2.4-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+从同一个 Release 下载 `kt-mcp-0.3.0-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
@@ -93,8 +93,8 @@ sha256sum --ignore-missing -c SHA256SUMS
 确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
 
 ```bash
-tar -xzf kt-mcp-0.2.4-linux.tar.gz
-cd kt-mcp-0.2.4-linux
+tar -xzf kt-mcp-0.3.0-linux.tar.gz
+cd kt-mcp-0.3.0-linux
 bash ./install.sh
 ```
 
@@ -113,7 +113,7 @@ bash scripts/install_linux.sh
 本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
 
 ```bash
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.2.4-py3-none-any.whl
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.0-py3-none-any.whl
 ```
 
 `--source` 只用于本地安装器，在线入口不接受它。
@@ -125,7 +125,7 @@ v0.2.4 起，在服务之外的普通用户终端运行：
 ```bash
 kt-mcp update
 kt-mcp update --check                  # 只检查，不安装、不暂停服务
-kt-mcp update --version 0.2.4           # 指定正式版；不支持降级
+kt-mcp update --version 0.3.0           # 指定正式版；不支持降级
 kt-mcp update --name kt-mcp-dev         # 选择要恢复运行的用户实例
 ```
 
@@ -239,11 +239,15 @@ WSL 的 Ubuntu 必须启用 systemd，且 Windows/WSL 虚拟机本身处于运�
 kt-mcp tui
 ```
 
-首次运行且配置不存在时，向导明确显示**启动当前命令时所在的目录**，按 Enter 使用它，也可输入其他已有目录。支持绝对路径、相对路径和 `~/项目`；路径中有空格时直接输入，不需要 shell 引号。不要把安装包解压目录误当工作区：先进入你希望 MCP 访问的项目目录，再启动面板。
+无参数的 `kt-mcp tui` 打开所有用户实例的统一列表；空列表按 `n` 新建。列表显示实例名、运行状态、端口、接入方式和工作区，上下键选择，Enter 打开该实例详细面板；`s` 启动、`x` 停止、`r` 重启、`o` 配置、`u` 查看链接、`l` 查看日志，操作只作用于当前选中实例。详细面板按 `q` 返回列表，列表按 `q` 退出，后台服务继续运行。
 
-已有配置时直接打开面板并沿用保存的工作区；之后在 shell 中切换目录，不会改变该服务的工作区。按 `v` 可核对完整路径，需要独立配置时使用 `--config /absolute/path/config.json`；同时运行多个实例时还需不同的 `--name` 和端口。
+在项目目录直接运行 `kt-mcp` 则优先打开该目录的实例。新实例向导显示**启动当前命令时所在的目录**，按 Enter 使用它，也可输入其他已有目录。支持绝对路径、相对路径和 `~/项目`；路径中有空格时直接输入，不需要 shell 引号。
 
-**修改已有配置按 `o` Configure**。首先显示“MCP will stop and stay offline while you edit”，默认选择 No；确认后等待当前服务停止，再进入预填现有值的向导。可以改工作区、端口、quick/named/local 接入方式；named 模式还可改公网域名和隐藏输入的 Tunnel Token，Enter 保留原值。MCP 访问令牌不重新生成，保存文件保持原属主和 `0600` 权限。
+每个命名实例保存到 `~/.config/kt-mcp/instances/kt-mcp-名称.json`（遵循 `XDG_CONFIG_HOME`），配套自己的 `kt-mcp-名称.service`、端口、访问令牌和启动状态。自动命名包含目录名和真实路径摘要，同名但路径不同的项目仍能区分。重复进入同一真实目录会找到原实例。已有 `~/.config/kt-mcp/config.json` 自动纳入列表，无需迁移；默认显示为 `kt-mcp`，以前已用自定义服务名注册时沿用实际服务名。
+
+按名称直接选择可运行 `kt-mcp tui --instance backend`。保留旧的单实例入口 `kt-mcp tui --config /absolute/path/config.json --name kt-mcp-backend`；显式配置路径不会被当前目录覆盖。
+
+**修改已有配置按 `o` Configure**。首先明确显示要暂停的实例，默认选择 No；确认后等待该服务停止，再进入预填现有值的向导，其他实例继续运行。可以改工作区、端口、quick/named/local 接入方式；named 模式还可改公网域名和隐藏输入的 Tunnel Token，Enter 保留原值。MCP 访问令牌不重新生成，保存文件保持原属主和 `0600` 权限。
 
 保存会同步更新 systemd 的工作目录并重新加载 unit，不改变自启动和 linger。**编辑期间保持停止，保存或取消后也保持停止；回到面板按 `s` 才启动**，并检查本机 MCP 连接。确认暂停之前取消则不改变服务状态。保存或 unit 更新失败时尝试恢复原配置和 unit；存在外部修改时拒绝覆盖并显示恢复状态。未注册服务时只编辑配置，之后按 `i` 注册/启动；检测到手工启动的 daemon 仍在运行时，先在原终端停止它再编辑。
 
@@ -271,7 +275,25 @@ local/named 的 `Configured` 地址可在未启动时查看，不表示服务可
 
 最小终端尺寸为 64×18。长链接完整换行，超出页面时用上下键或 PgUp/PgDn 滚动，不省略字符；复制时若终端带入折行，按 `u` 查看准确的单行导出命令。工作区长路径在中间省略，完整路径见 `v`。弹窗支持中文和方向键、PgUp/PgDn 滚动，Enter/Esc/q 返回主面板。
 
-多实例使用与安装相同的 `--name` 和 `--config`。管理已安装的系统级服务时使用 `tui --system --config /absolute/path/config.json`，需要相应权限；系统级首次注册仍通过显式指定 `--run-as` 的 CLI 完成。
+以上详细面板按键保持可用，统一列表还提供 `n` 新建及方向键选择。管理已安装的系统级服务时使用 `tui --system --config /absolute/path/config.json`，需要相应权限；系统级首次注册仍通过显式指定 `--run-as` 的 CLI 完成。
+
+## 多实例命令行
+
+```bash
+kt-mcp instance create frontend --workspace /srv/frontend --port 8765 --mode local --start
+kt-mcp instance create backend --workspace /srv/backend --port 8766 --mode quick --start
+kt-mcp instance list
+kt-mcp instance stop frontend
+kt-mcp instance start frontend
+kt-mcp instance restart backend
+kt-mcp instance link backend
+```
+
+`create` 的工作区默认当前目录，省略 `--port` 会推荐未被其他实例预留、且当前可绑定的端口；省略 `--start` 只保存配置。`--start` 只注册并立即启动；开机自启动和退出登录后的持久运行可在 TUI 详细面板用 `e`、`g` 开启。统一列表首次按 `s` 则沿用 TUI 的注册、启用和 linger 流程。名称可以写 `backend` 或完整的 `kt-mcp-backend`。各实例令牌独立生成，普通列表不输出令牌，`link` 显式输出完整客户端链接。
+
+创建、编辑或启动前会检查已有实例的端口及 named 域名冲突；停止的实例仍保留自己的端口配置。建议各 named 实例配置独立 Tunnel，并将公网路由指向各自本机端口。Quick Tunnel 的随机域名由 Cloudflare 分配，重启可能变化，不能在本机任意指定。
+
+多实例共用一套软件安装。目前 `kt-mcp update` 仍按选定服务执行更新：在统一面板停止其他共享安装的实例后，用 `kt-mcp update --name kt-mcp-backend` 更新，完成后再按需要启动其他实例。它会拒绝在其他共享实例仍运行时替换安装环境。
 
 ## 无界面运行与客户端配置
 
@@ -305,7 +327,7 @@ kt-mcp client-config
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python scripts/build_linux.py
-.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.2.4-linux.tar.gz --systemd
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.0-linux.tar.gz --systemd
 ```
 
 构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。
@@ -316,6 +338,7 @@ python3 -m venv .venv
 
 ```bash
 KT_MCP_TEST_SYSTEMD=1 .venv/bin/python -m pytest tests/integration/test_systemd_lifecycle.py -q -k independent_lifetime
+KT_MCP_TEST_SYSTEMD=1 .venv/bin/python -m pytest tests/integration/test_instances_lifecycle.py -q
 ```
 
 CI 在 Ubuntu 22.04 / Python 3.10、Ubuntu 24.04 / Python 3.12、Windows / Python 3.12 上运行回归测试，并在 Ubuntu 验证真实用户级/系统级 unit 和全新安装包。推送与包版本匹配的 `v*` 标签后，只有全部测试和安装验收成功，流程才会上传校验过的资产并公开 Release。见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。

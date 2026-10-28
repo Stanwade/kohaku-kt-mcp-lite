@@ -10,10 +10,12 @@ import sys
 import time
 import unicodedata
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
-from kt_mcp.daemon import client_url, default_config_path, load_config, startup_url
+from kt_mcp.daemon import client_url, default_config_path, startup_url
 from kt_mcp.desktop import client_configuration
+from kt_mcp.instances import catalog_lock, ensure_available, read_config
 from kt_mcp.managed_service import (
     ManagedServiceError,
     assert_external_process,
@@ -158,7 +160,7 @@ class TerminalController:
     def __init__(self, manager: ServiceManager, config_path: Path):
         self.manager = manager
         self.config_path = config_path.expanduser().absolute()
-        self.config = load_config(self.config_path)
+        self.config = read_config(self.config_path)
         self.note = ""
         self.status = {}
         self.linger = "unknown"
@@ -170,8 +172,16 @@ class TerminalController:
         self.connection_verified = False
         self.connection_tone = "warning"
         self._configuration_paused = False
+        self.return_to_list = False
         self._secrets = {
-            secret for secret in (self.config.token, self.config.tunnel_token) if secret
+            secret
+            for secret in (
+                self.config.token,
+                self.config.tunnel_token,
+                os.environ.get("KT_MCP_TOKEN"),
+                os.environ.get("TUNNEL_TOKEN"),
+            )
+            if secret
         }
 
     def redact(self, text: str) -> str:
@@ -264,12 +274,15 @@ class TerminalController:
             raise
 
         style = TerminalStyle()
-        print(style.text("Configure MCP", bold=True, color="cyan"))
+        print(
+            style.text("Configure MCP · " + self.manager.name, bold=True, color="cyan")
+        )
         if binding is None:
             print("No service is registered. Edit the saved settings only.")
             prompt = "Edit settings?"
         else:
             print("MCP will stop and stay offline while you edit.")
+            print(f"Only instance {self.manager.name} will be paused.")
             print("After saving or cancelling, press [s] Start.")
             prompt = "Stop MCP and configure?"
         while True:
@@ -287,6 +300,7 @@ class TerminalController:
         stopped = False
         unit_attempted = False
         candidate = None
+        publication = ExitStack()
 
         def require_stopped(current):
             nonlocal stopped
@@ -304,6 +318,9 @@ class TerminalController:
         def before_save(config):
             nonlocal stopped
             self._remember(config)
+            if not self.manager.system:
+                publication.enter_context(catalog_lock())
+                ensure_available(config, exclude=self.config_path)
             current = self._edit_binding()
             if binding is None:
                 if current is not None:
@@ -402,6 +419,8 @@ class TerminalController:
             )
             if not cancelled:
                 raise
+        finally:
+            publication.close()
 
     def refresh(self):
         """Refresh process and startup evidence; logs are queried only on request."""
@@ -415,7 +434,7 @@ class TerminalController:
         self.connection_detail = "Service state could not be checked."
         self.connection_tone = "warning"
         try:
-            self.config = load_config(self.config_path)
+            self.config = read_config(self.config_path)
             self.redact("")  # Remember this generation's secrets before another reload.
             if self.config.settings.mode != "quick":
                 self.connection_url = client_url(self.config, self.config_path)
@@ -527,7 +546,12 @@ class TerminalController:
             "The home screen shows the MCP link. u opens the link and its one-line export command.",
             "Up/Down/PgUp/PgDn scroll long home-screen links. c opens client JSON.",
             "v shows details without credentials; l keeps credentials redacted in logs.",
-            "q quits this panel and leaves the service unchanged. Uppercase keys also work.",
+            (
+                "q returns to the instance list and leaves services unchanged."
+                if self.return_to_list
+                else "q quits this panel and leaves the service unchanged."
+            )
+            + " Uppercase keys also work.",
             (
                 "State is the systemd process state. Startup verified / Tunnel started "
                 "requires a matching startup record; it is not a continuous health check."
@@ -616,6 +640,20 @@ class TerminalController:
         )
         return self.redact("\n".join(lines))
 
+    def _check_start_available(self):
+        """Check this saved instance before install/start, including post-edit starts."""
+        if self.manager.system:
+            # Explicit system units are outside the current user's instance catalog.
+            return
+        config = read_config(self.config_path)
+        status = self.manager.status()
+        ensure_available(
+            config,
+            exclude=self.config_path,
+            check_socket=status.get("ActiveState")
+            not in {"active", "activating", "deactivating", "reloading"},
+        )
+
     def act(self, key: str):
         """Explicit management actions only; quitting never stops the daemon."""
         key = key.lower()
@@ -628,10 +666,13 @@ class TerminalController:
                 raise ValueError(
                     "Install a system unit first with service install --system --run-as USER."
                 )
+            self._check_start_available()
             self.manager.install(self.config_path, now=True, linger=True)
             self._configuration_paused = False
             self.note = "Service registered and enabled; check MCP startup in the logs."
         elif key in {"s", "x", "r", "e", "d"}:
+            if key in {"s", "r"}:
+                self._check_start_available()
             if key in {"s", "r"} and self._configuration_paused:
                 binding = self._edit_binding()
                 if binding is None:
@@ -901,7 +942,8 @@ def _screen(screen, controller: TerminalController):
                 screen,
                 height - 2,
                 2,
-                "[o] Configure [u] Link [l] Logs [?] Help [q] Quit panel",
+                "[o] Configure [u] Link [l] Logs [?] Help [q] "
+                + ("Instances" if controller.return_to_list else "Quit panel"),
             )
             _put(
                 screen,
@@ -956,10 +998,21 @@ def _screen(screen, controller: TerminalController):
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="kt-mcp tui", description=__doc__)
-    parser.add_argument("--config", type=Path, default=default_config_path())
-    parser.add_argument("--name", default="kt-mcp")
+    parser.add_argument("--config", type=Path, help="open one explicit configuration")
+    parser.add_argument("--name", help="service name for --config or --system")
     parser.add_argument("--system", action="store_true")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--instance", help="open a saved instance in the manager")
+    selection.add_argument(
+        "--workspace", type=Path, help="select or set up this workspace"
+    )
     args = parser.parse_args(argv)
+    if (args.instance is not None or args.workspace is not None) and (
+        args.config is not None or args.name is not None or args.system
+    ):
+        parser.error(
+            "--instance/--workspace cannot be combined with --config/--name/--system"
+        )
     if sys.platform != "linux":
         parser.error(
             "the terminal manager requires Linux; use the desktop GUI on Windows"
@@ -976,15 +1029,33 @@ def main(argv: list[str]) -> int:
         import curses
 
         locale.setlocale(locale.LC_ALL, "")
-        path = args.config.expanduser().absolute()
-        if not path.exists():
-            if args.system:
-                raise ValueError(
-                    "create the configuration as the run user and install the system unit first"
-                )
-            setup_config(path)
-        controller = TerminalController(ServiceManager(args.name, args.system), path)
-        curses.wrapper(_screen, controller)
+        if args.config is not None or args.name is not None or args.system:
+            path = (args.config or default_config_path()).expanduser().absolute()
+            if not path.exists():
+                if args.system:
+                    raise ValueError(
+                        "create the configuration as the run user and install the system unit first"
+                    )
+                setup_config(path)
+            controller = TerminalController(
+                ServiceManager(args.name or "kt-mcp", args.system), path
+            )
+            curses.wrapper(_screen, controller)
+        else:
+            from kt_mcp import instances
+            from kt_mcp.instance_tui import InstanceManagerController, instance_screen
+
+            selected = None
+            if args.instance is not None:
+                selected = instances.get_instance(args.instance)
+            elif args.workspace is not None:
+                selected = instances.find_workspace(args.workspace)
+                if selected is None:
+                    selected = instances.setup_instance(workspace=args.workspace)
+            manager = InstanceManagerController(
+                selected_name=selected.name if selected is not None else None
+            )
+            curses.wrapper(instance_screen, manager, selected is not None)
     except ImportError:
         parser.error("this Python installation needs curses support")
     except curses.error:

@@ -1,3 +1,35 @@
+# v0.3.0 — Independent workspaces and one instance manager
+
+每个项目目录可使用独立的 kt-mcp 实例，拥有自己的 workspace、端口、MCP 令牌、接入方式和 systemd 服务。
+
+## 使用方式
+
+- 在项目目录运行 `kt-mcp`，选择该真实路径的已有实例；新目录进入独立实例向导。
+- 运行 `kt-mcp tui` 打开统一列表，查看各实例的状态、端口、接入方式和工作区。
+- 上下键选择，Enter 查看详情；`s / x / r` 启动、停止、重启，`o` 配置，`u` 查看链接，`l` 查看日志，`n` 新建。
+- 配置前明确提示并确认暂停选中实例；保存或取消后保持停止，按 `s` 再启动，其他实例继续运行。
+- 命令行支持 `kt-mcp instance create/list/start/stop/restart/link`。例如：
+
+```bash
+kt-mcp instance create frontend --workspace /srv/frontend --port 8765 --mode local --start
+kt-mcp instance create backend --workspace /srv/backend --port 8766 --mode quick --start
+kt-mcp tui
+```
+
+## 配置与兼容
+
+新实例保存到用户配置目录下的 `kt-mcp/instances/`。旧默认配置、旧的显式 `--config / --name` 入口以及非交互 stdio 客户端继续可用。实例创建使用独立随机 MCP 令牌；现有实例编辑保留自身令牌。
+
+保存与启动前检查端口及固定域名冲突；停止的实例继续保留自己的端口。Quick Tunnel 的地址由 Cloudflare 分配，固定地址使用每个实例自己的 named 配置和对应公网路由。
+
+统一列表管理当前普通用户的实例。系统级服务继续通过显式 `--system --config` 入口管理。多实例共享安装时，更新前需先停止其他共享实例，再用 `kt-mcp update --name kt-mcp-名称` 指定待恢复的实例。
+
+## 验证范围
+
+增加实例目录发现、旧配置兼容、端口/域名冲突、并发保存及列表动作路由测试；真实 systemd 验收同时运行两个实例，检查文件与令牌隔离、配置暂停、取消、独立重启及退出统一面板后的后台运行。保留已有跨平台回归、发布包安装和更新回滚门禁。
+
+---
+
 # v0.2.4 — One-command updates and configuration inside the TUI
 
 本次增加 `kt-mcp update`，以及 TUI 内的工作区和接入方式编辑。Linux 服务继续由 systemd 管理，退出终端或面板后可持续运行。

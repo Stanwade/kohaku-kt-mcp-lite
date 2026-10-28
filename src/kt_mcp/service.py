@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from kt_mcp.daemon import default_config_path, load_config
+from kt_mcp.daemon import default_config_path
 
 MANAGED_MARKER = "# Managed by kt-mcp service (v1)"
 STATUS_PROPERTIES = (
@@ -87,7 +87,9 @@ def render_unit(
     info = config_path.stat()
     if info.st_uid != account.pw_uid or stat.S_IMODE(info.st_mode) != 0o600:
         raise ValueError("config must be mode 600 and owned by the service account")
-    config = load_config(config_path)
+    from kt_mcp.instances import read_config
+
+    config = read_config(config_path)
     executable = _absolute(python if python is not None else sys.executable)
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise ValueError("the service Python executable must exist and be executable")
@@ -271,6 +273,10 @@ class ServiceManager:
         if linger and self.system:
             raise ValueError("--linger is only available for user services")
         content = render_unit(config_path, system=self.system, run_as=run_as)
+        if not self.system:
+            from kt_mcp.instances import ensure_available, read_config
+
+            ensure_available(read_config(config_path), exclude=Path(config_path))
         previous = self._existing()
         if previous is not None and previous != content and not replace:
             raise FileExistsError("managed unit differs; use --replace to update it")
@@ -309,7 +315,25 @@ class ServiceManager:
         if now and action not in {"enable", "disable"}:
             raise ValueError("--now is only available with enable or disable")
         self._mutating()
-        self._managed()
+        content = self._managed()
+        if not self.system and (
+            action in {"start", "restart"} or (action == "enable" and now)
+        ):
+            from kt_mcp.instances import ensure_available, read_config
+            from kt_mcp.managed_service import ManagedServiceError, _parse_unit
+
+            try:
+                _, _, config_path = _parse_unit(content.encode("utf-8"), False)
+            except ManagedServiceError:
+                raise ValueError(
+                    "Cannot identify this managed service configuration."
+                ) from None
+            active = self.status().get("ActiveState")
+            ensure_available(
+                read_config(config_path),
+                exclude=config_path,
+                check_socket=active not in {"active", "activating", "reloading"},
+            )
         arguments = [action]
         if now:
             arguments.append("--now")

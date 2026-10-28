@@ -329,6 +329,7 @@ def _collect_config(
     environment_tunnel_token: str,
     save: Callable[[DaemonConfig], None],
     title: str,
+    destination: Callable[[DaemonConfig], Path] | None = None,
 ) -> DaemonConfig:
     ask = input if ask is None else ask
     ask_secret = getpass.getpass if ask_secret is None else ask_secret
@@ -382,7 +383,8 @@ def _collect_config(
                 summary.append(("Origin", config.settings.public_origin))
             if config.settings.cloudflared:
                 summary.append(("Cloudflared", config.settings.cloudflared))
-            summary.append(("Save to", str(path)))
+            save_path = destination(config) if destination is not None else path
+            summary.append(("Save to", str(save_path)))
             for label, value in summary:
                 print(f"  {label:<11} {style.text(value, bold=True)}")
             answer = _read(
@@ -406,7 +408,7 @@ def _collect_config(
                 )
                 continue
             save(config)
-            print(style.text("Saved", bold=True, color="green") + f" {path}")
+            print(style.text("Saved", bold=True, color="green") + f" {save_path}")
             return config
 
         field = fields[step]

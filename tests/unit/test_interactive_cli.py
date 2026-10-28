@@ -1,5 +1,6 @@
 import builtins
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -65,7 +66,7 @@ def test_linux_bare_command_in_a_terminal_opens_tui(
     result = cli.main() if use_process_argv else cli.main([])
 
     assert result == 17
-    assert entrypoints.tui == [[]]
+    assert entrypoints.tui == [["--workspace", str(Path.cwd())]]
     assert entrypoints.runtimes == []
     assert entrypoints.stdio == []
 

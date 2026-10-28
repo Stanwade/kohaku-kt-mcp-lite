@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
@@ -23,12 +24,16 @@ TUNNEL_TOKEN = "private-cloudflare-tunnel-token"
 
 
 @pytest.fixture(autouse=True)
-def isolated_tokens(monkeypatch):
+def isolated_tokens(monkeypatch, tmp_path):
     import curses
 
     monkeypatch.delenv("KT_MCP_TOKEN", raising=False)
     monkeypatch.delenv("TUNNEL_TOKEN", raising=False)
     monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "isolated-config"))
+    # Catalog/socket guards have dedicated coverage in test_instance_tui.py.
+    monkeypatch.setattr(module, "ensure_available", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "catalog_lock", nullcontext)
     monkeypatch.setattr(curses, "has_colors", lambda: False)
 
 
@@ -1144,6 +1149,43 @@ def test_system_reconfiguration_keeps_the_verified_run_account(
         "linger": False,
     }
     assert fixture.manager.status_data["ActiveState"] == "inactive"
+
+
+def test_system_configuration_with_preserved_user_xdg_never_uses_user_catalog(
+    editable_service, monkeypatch, tmp_path
+):
+    fixture = editable_service
+    fixture.manager.system = True
+    # This existing private config belongs to the run user, not the simulated root.
+    owner = fixture.path.stat().st_uid
+    user_xdg = tmp_path / "preserved-user-xdg"
+    user_xdg.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(user_xdg))
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+
+    def no_user_catalog(*args, **kwargs):
+        pytest.fail(
+            "system operations must not read or write the user instance catalog"
+        )
+
+    monkeypatch.setattr(module, "catalog_lock", no_user_catalog)
+    monkeypatch.setattr(module, "ensure_available", no_user_catalog)
+    fixture.controller = TerminalController(fixture.manager, fixture.path)
+    fixture.controller.configure(ask=answers(["y", "", "8123", "local", ""]))
+
+    saved = json.loads(fixture.path.read_text(encoding="utf-8"))
+    assert saved["port"] == 8123
+    assert saved["token"] == MCP_TOKEN
+    assert fixture.path.stat().st_uid == owner
+    assert fixture.path.stat().st_mode & 0o777 == 0o600
+    assert fixture.manager.calls[0][2]["run_as"] == "service-user"
+    assert fixture.manager.status_data["ActiveState"] == "inactive"
+    assert list(user_xdg.iterdir()) == []
+
+    fixture.controller.act("s")
+    assert fixture.events[-1][0] == "start"
+    assert fixture.manager.status_data["ActiveState"] == "active"
+    assert list(user_xdg.iterdir()) == []
 
 
 @pytest.mark.parametrize("appears_during_edit", [False, True])

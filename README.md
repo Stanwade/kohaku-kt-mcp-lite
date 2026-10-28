@@ -3,7 +3,7 @@
 KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI、Linux TUI / systemd 管理和 Cloudflare Tunnel 自动接入。
 
 Linux / Ubuntu 用户可用下方在线命令安装，或在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 手动下载安装包。首次使用按 [Ubuntu 指南](UBUNTU.md) 进入项目目录并运行 `kt-mcp`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
-Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.2.4 增加 `kt-mcp update` 和 TUI 内的工作区、接入方式配置，继续提供在线安装、Linux 安装包、通用 Python wheel 和源码包。
+Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.3.0 增加按目录选择独立实例和统一 TUI 管理，每个实例可配置自己的端口及接入方式；继续提供 `kt-mcp update`、在线安装、Linux 安装包、通用 Python wheel 和源码包。
 源码安装、客户端连接和自行打包的方法见下文。
 
 A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
@@ -33,13 +33,25 @@ cd -- /path/to/your/project
 kt-mcp
 ```
 
-安装管道只完成软件安装，工作区在后续首次启动向导中选择。向导用颜色和粗体突出提示与默认值，并显示启动命令时所在的目录：Enter 使用它，也可输入其他已有路径，输入错误可重试，保存前可返回修改或取消。已有配置会继续沿用保存的工作区。
+安装管道只完成软件安装。在不同项目目录运行 `kt-mcp` 时，会按目录的真实路径选择已有实例；首次进入一个新目录时，向导创建独立配置，推荐一个未被占用或预留的端口。Enter 使用默认值，也可修改工作区、端口及 local/quick/named 接入方式，保存前可返回修改或取消。重复进入同一目录会选中同一个实例。
 
-首次 TUI 向导建立配置后，按 `i` 注册并启动用户服务、开启 linger。紧凑主页默认显示**含 MCP 访问令牌的完整连接地址**；按 `u` 查看纯链接及当前配置的单行导出命令，`c` 仍可查看客户端 JSON，`l` 按需加载脱敏日志，`q` 退出且不改变服务状态。
-按 `o` **Configure** 可修改工作区、端口、接入方式及固定域名设置。面板先提醒并确认暂停 MCP，确认后停止服务再进入编辑；保存或取消后保持停止，按 `s` 启动。已有 MCP 访问令牌保留，修改工作区会同步更新 systemd 工作目录。
-只创建配置可以运行 `kt-mcp init`。脚本中明确指定 `kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
+运行 `kt-mcp tui` 可在统一列表中查看全部用户实例，用上下键选择实例，按 Enter 进入详细面板。新实例保存后，按 `s` 在列表中启动，或进入详细面板按 `i` 注册并启动用户服务、开启 linger。详细面板默认显示**含 MCP 访问令牌的完整连接地址**；按 `u` 查看纯链接及当前配置的单行导出命令，`c` 仍可查看客户端 JSON，`l` 按需加载脱敏日志，`q` 退出且不改变服务状态。
+按 `o` **Configure** 可修改选中实例的工作区、端口、接入方式及固定域名设置。面板先提醒并确认暂停该实例，确认后停止它再进入编辑；保存或取消后保持停止，按 `s` 启动，其他实例继续运行。已有 MCP 访问令牌保留，修改工作区会同步更新 systemd 工作目录。
+也可直接创建两个实例（项目路径必须已存在）：
 
-命令行可用 `kt-mcp link`，独立配置用 `kt-mcp link --config /absolute/path/config.json`，输出完整单行 URL。local/named 的配置地址不代表服务已启动；quick 等待当前启动记录，未就绪或失效时不显示旧地址。启动验证不等于持续公网健康检查。主页长链接可滚动，日志和 Cloudflare Tunnel Token 继续脱敏；无色终端自动降级，`NO_COLOR=1 kt-mcp` 可关闭颜色并保留终端支持的粗体。
+```bash
+kt-mcp instance create frontend --workspace /srv/frontend --port 8765 --mode local --start
+kt-mcp instance create backend --workspace /srv/backend --port 8766 --mode quick --start
+kt-mcp instance list
+kt-mcp instance link backend
+kt-mcp tui
+```
+
+每个实例独立保存工作区、端口、MCP 访问令牌、接入配置和运行状态。端口和固定域名冲突会被拒绝。Quick Tunnel 的地址由 Cloudflare 分配；需要固定地址时，为实例选择 named 模式并配置对应域名和 Tunnel。旧的默认配置自动纳入列表，并沿用已注册的服务名。
+
+原有单配置接口继续可用：只创建配置可以运行 `kt-mcp init`。脚本中明确指定 `kt-mcp init --workspace /absolute/workspace`，然后 `kt-mcp service install --now --linger`。
+
+命名实例使用 `kt-mcp instance link 名称`；旧默认实例使用 `kt-mcp link`，显式配置使用 `kt-mcp link --config /absolute/path/config.json`，输出完整单行 URL。local/named 的配置地址不代表服务已启动；quick 等待当前启动记录，未就绪或失效时不显示旧地址。启动验证不等于持续公网健康检查。主页长链接可滚动，日志和 Cloudflare Tunnel Token 继续脱敏；无色终端自动降级，`NO_COLOR=1 kt-mcp` 可关闭颜色并保留终端支持的粗体。
 
 后续升级只需：
 
@@ -75,7 +87,7 @@ python -m venv .venv
 ```
 
 The protocol transport defaults to **stdio**. A client using pipes launches the server and owns its lifetime; protocol stdout remains reserved for MCP messages and logs go to stderr.
-On Linux only, running `kt-mcp` with no arguments and interactive stdin **and** stdout opens the TUI. Use `kt-mcp --transport stdio` to explicitly select the protocol even in a terminal or a PTY-based client. Explicit arguments, non-interactive calls, and Windows keep their existing command-line behavior.
+On Linux only, running `kt-mcp` with no arguments and interactive stdin **and** stdout selects or creates an instance for the current directory. `kt-mcp tui` opens the unified instance manager. Use `kt-mcp --transport stdio` to explicitly select the protocol even in a terminal or a PTY-based client. Explicit arguments, non-interactive calls, and Windows keep their existing command-line behavior.
 
 On Linux/macOS, use `.venv/bin/python` and `.venv/bin/kt-mcp` instead.
 

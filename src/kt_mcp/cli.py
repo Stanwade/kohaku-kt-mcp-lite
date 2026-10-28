@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         from kt_mcp.tui import main as tui_main
 
-        return tui_main([])
+        return tui_main(["--workspace", str(Path.cwd())])
     if argv and argv[0] in {"init", "daemon", "client-config", "link"}:
         from kt_mcp.daemon import main as daemon_main
 
@@ -33,6 +33,10 @@ def main(argv: list[str] | None = None) -> int:
         from kt_mcp.tui import main as tui_main
 
         return tui_main(argv[1:])
+    if argv and argv[0] == "instance":
+        from kt_mcp.instance_cli import main as instance_main
+
+        return instance_main(argv[1:])
     if argv and argv[0] == "update":
         from kt_mcp.update import main as update_main
 
@@ -40,9 +44,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Kohaku KT MCP: standalone workspace tools derived from KohakuTerrarium.",
         epilog=(
-            "Linux commands: init, daemon, link, client-config, service, tui, update. "
+            "Linux commands: init, daemon, link, client-config, service, tui, instance, update. "
             "Use kt-mcp COMMAND --help for details. "
-            "On Linux, no arguments in an interactive terminal opens the TUI. "
+            "On Linux, no arguments in a terminal selects this directory's instance. "
+            "Use kt-mcp tui to manage all instances. "
             "Use --transport stdio to force the MCP protocol, including in a terminal. "
             "Upstream: https://github.com/Kohaku-Lab/KohakuTerrarium"
         ),
