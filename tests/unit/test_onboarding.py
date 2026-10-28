@@ -72,6 +72,37 @@ def test_enter_accepts_visible_current_directory_and_saves_only_after_review(
     assert "8765" in shown and "local" in shown.lower()
     assert "save" in answers.prompts[-1].lower()
     assert loaded.token not in shown
+    assert "\x1b" not in shown
+
+
+@pytest.mark.parametrize(
+    "stdin_tty,stdout_tty,term",
+    [
+        (False, True, "xterm-256color"),
+        (True, False, "xterm-256color"),
+        (True, True, "dumb"),
+        (True, True, ""),
+    ],
+    ids=["redirected-input", "redirected-output", "dumb-terminal", "missing-term"],
+)
+def test_setup_keeps_plain_text_when_terminal_styling_is_unavailable(
+    tmp_path, monkeypatch, capsys, stdin_tty, stdout_tty, term
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: stdin_tty)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: stdout_tty)
+    monkeypatch.setenv("TERM", term)
+    path = tmp_path / "private/config.json"
+    answers = Inputs(["", "", "", ""], path)
+
+    setup_config(path, ask=answers, ask_secret=no_secret)
+
+    output = capsys.readouterr()
+    shown = output.out + output.err + "\n".join(answers.prompts)
+    assert "\x1b" not in shown
+    assert "Workspace" in shown and str(tmp_path) in shown
+    assert "Save?" in answers.prompts[-1]
+    assert load_config(path).settings.workspace == str(tmp_path)
 
 
 @pytest.mark.parametrize("kind", ["relative", "home", "absolute"])

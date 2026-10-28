@@ -2,7 +2,9 @@
 
 import getpass
 import os
+import re
 import secrets
+import sys
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +17,62 @@ from kt_mcp.desktop import DesktopSettings
 
 class SetupCancelled(Exception):
     """The user left setup without confirming a configuration."""
+
+
+class _TerminalStyle:
+    """Use the current terminal's capabilities without decorating redirected text."""
+
+    def __init__(self):
+        self._bold = ""
+        self._reset = ""
+        self._colors = {}
+        term = os.environ.get("TERM", "")
+        if (
+            not sys.stdin.isatty()
+            or not sys.stdout.isatty()
+            or not term
+            or term.lower() == "dumb"
+        ):
+            return
+        try:
+            import curses
+        except ImportError:
+            return
+
+        def sequence(value: bytes | None) -> str:
+            # terminfo padding directives are for tputs(), not printable text.
+            return re.sub(rb"\$<[^>]*>", b"", value or b"").decode("ascii")
+
+        try:
+            curses.setupterm(term=term, fd=sys.stdout.fileno())
+            reset = sequence(curses.tigetstr("sgr0"))
+            if not reset:
+                return
+            bold = sequence(curses.tigetstr("bold"))
+            colors = {}
+            foreground = curses.tigetstr("setaf")
+            if (
+                "NO_COLOR" not in os.environ
+                and foreground
+                and curses.tigetnum("colors") >= 8
+            ):
+                for name, number in (("cyan", 6), ("green", 2), ("yellow", 3)):
+                    colors[name] = sequence(curses.tparm(foreground, number))
+        except (curses.error, OSError, ValueError):
+            return
+        self._bold = bold
+        self._reset = reset
+        self._colors = colors
+
+    def text(self, value: str, *, bold: bool = False, color: str = "") -> str:
+        prefix = (self._bold if bold else "") + self._colors.get(color, "")
+        return prefix + value + self._reset if prefix else value
+
+    def prompt(self, label: str, default: str | None = None) -> str:
+        label = self.text(label, bold=True)
+        if default is not None:
+            label += " [" + self.text(default, bold=True, color="cyan") + "]"
+        return label + ": "
 
 
 def _read(reader: Callable[[str], str], prompt: str) -> str:
@@ -129,9 +187,9 @@ def setup_config(
             "(letters, digits, _ or -); fix or unset this environment variable."
         ) from None
     environment_tunnel_token = os.environ.get("TUNNEL_TOKEN", "")
-    print("Kohaku KT MCP - first-time Linux setup")
-    print("Enter accepts the value in [brackets]. Use :back to return or :q to cancel.")
-    print(f"Current directory where this command was started: {cwd}")
+    style = _TerminalStyle()
+    print(style.text("Kohaku KT MCP · Setup", bold=True, color="cyan"))
+    print("Enter = default   :back = back   :q = cancel")
     step = 0
     while True:
         fields = ["workspace", "port", "mode"]
@@ -158,20 +216,22 @@ def setup_config(
             )
             # Reuse the daemon's final validation before showing a save action.
             config.validate()
-            print("\nReview configuration before saving")
-            print(f"  Workspace: {config.settings.workspace}")
-            print(f"  Local HTTP port: {config.settings.port}")
-            print(f"  Connection mode: {config.settings.mode}")
+            print("\n" + style.text("Review", bold=True, color="cyan"))
+            summary = [
+                ("Workspace", config.settings.workspace),
+                ("Port", str(config.settings.port)),
+                ("Mode", config.settings.mode),
+            ]
             if config.settings.mode == "named":
-                print(f"  Public HTTPS origin: {config.settings.public_origin}")
+                summary.append(("Origin", config.settings.public_origin))
             if config.settings.cloudflared:
-                print(f"  Cloudflared executable: {config.settings.cloudflared}")
-            print(f"  Configuration file: {path}")
-            print("  Credentials: configured; values hidden.")
+                summary.append(("Cloudflared", config.settings.cloudflared))
+            summary.append(("Save to", str(path)))
+            for label, value in summary:
+                print(f"  {label:<11} {style.text(value, bold=True)}")
             answer = _read(
                 ask,
-                "Save configuration? "
-                "[Enter=save, edit=change from workspace, :back=previous, :q=cancel]: ",
+                style.prompt("Save?", "Enter=save / edit / :back / :q"),
             ).lower()
             if answer == ":q":
                 raise SetupCancelled("Setup cancelled; no configuration was saved.")
@@ -183,34 +243,45 @@ def setup_config(
                 continue
             if answer:
                 print(
-                    "Press Enter to save, edit or :back to make changes, or :q to cancel."
+                    style.text(
+                        "Use Enter to save, edit to change, :back, or :q.",
+                        color="yellow",
+                    )
                 )
                 continue
             save_config(config, path)
-            print(f"Private configuration created: {path}")
+            print(style.text("Saved", bold=True, color="green") + f" {path}")
             return config
 
         field = fields[step]
         if field == "workspace":
-            prompt = f"Workspace directory [{values[field]}]: "
+            prompt = style.prompt("Workspace", values[field])
         elif field == "port":
-            prompt = f"Local HTTP port [{values[field]}]: "
+            prompt = style.prompt("Port", values[field])
         elif field == "mode":
-            print("  1 / local: this computer only (no public tunnel).")
-            print("  2 / quick: a temporary public Cloudflare address.")
-            print("  3 / named: your configured Cloudflare Tunnel and HTTPS domain.")
-            prompt = f"Connection mode (local/quick/named or 1/2/3) [{values[field]}]: "
+            choices = (
+                ("1 local", "this PC"),
+                ("2 quick", "temp URL"),
+                ("3 named", "your domain"),
+            )
+            print(
+                "  ".join(
+                    style.text(name, bold=True) + ": " + description
+                    for name, description in choices
+                )
+            )
+            prompt = style.prompt("Mode", values[field])
         elif field == "origin":
             prompt = (
-                f"Public HTTPS origin (no path) [{values[field]}]: "
+                style.prompt("HTTPS origin", values[field])
                 if values[field]
-                else "Public HTTPS origin (for example https://mcp.example.com, no path): "
+                else style.prompt("HTTPS origin (e.g. https://mcp.example.com)")
             )
         else:
-            prompt = (
-                "Cloudflare Tunnel token (hidden; Enter keeps the previous value): "
+            prompt = style.prompt(
+                "Tunnel token (hidden; Enter keeps it)"
                 if values[field]
-                else "Cloudflare Tunnel token (hidden): "
+                else "Tunnel token (hidden)"
             )
         answer = _read(ask_secret if field == "tunnel_token" else ask, prompt)
         command = answer.lower()
@@ -220,7 +291,7 @@ def setup_config(
             if step:
                 step -= 1
             else:
-                print("This is the first step; enter a workspace or use :q to cancel.")
+                print("First step. Enter a workspace or :q.")
             continue
         value = answer or values[field]
         try:
@@ -237,11 +308,9 @@ def setup_config(
                     "A Cloudflare Tunnel token is required for named mode."
                 )
         except ValueError as exc:
-            print(str(exc))
+            print(style.text(str(exc), color="yellow"))
             continue
         values[field] = value
         if field == "mode" and value == "named" and environment_tunnel_token:
-            print(
-                "Cloudflare Tunnel token: using TUNNEL_TOKEN from the environment (hidden)."
-            )
+            print("Tunnel token: using TUNNEL_TOKEN (hidden).")
         step += 1

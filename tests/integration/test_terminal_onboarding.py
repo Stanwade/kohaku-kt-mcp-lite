@@ -3,6 +3,7 @@
 import errno
 import json
 import os
+import re
 import secrets
 import select
 import shutil
@@ -55,7 +56,10 @@ class TerminalSession:
         expected = prompt.encode("utf-8")
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            found = self.output.find(expected, self.position)
+            # Keep raw bytes for attribute/credential checks. Matching visible
+            # text must also work when a label and its value use different styles.
+            plain = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output)
+            found = plain.find(expected, self.position)
             if found >= 0:
                 self.position = found + len(expected)
                 return
@@ -81,6 +85,37 @@ class TerminalSession:
     def assert_hidden(self, value):
         if value.encode("utf-8") in self.output:
             pytest.fail("A credential was echoed to the terminal", pytrace=False)
+
+    def attributes_at(self, text):
+        """Read the actual SGR state at a label, rather than finding any SGR byte."""
+        position = self.output.find(text.encode("utf-8"))
+        if position < 0:
+            pytest.fail("The terminal styling target was not rendered", pytrace=False)
+        bold = False
+        foreground = None
+        for match in re.finditer(rb"\x1b\[([0-9;]*)m", self.output[:position]):
+            parameters = iter(int(value or b"0") for value in match[1].split(b";"))
+            for value in parameters:
+                if value == 0:
+                    bold, foreground = False, None
+                elif value == 1:
+                    bold = True
+                elif value == 22:
+                    bold = False
+                elif 30 <= value <= 37:
+                    foreground = value - 30
+                elif 90 <= value <= 97:
+                    foreground = value - 90 + 8
+                elif value == 39:
+                    foreground = None
+                elif value in (38, 48):
+                    mode = next(parameters, None)
+                    color = tuple(
+                        next(parameters, None) for _ in range(3 if mode == 2 else 1)
+                    )
+                    if value == 38:
+                        foreground = color
+        return bold, foreground
 
     def finish(self):
         try:
@@ -152,7 +187,13 @@ def terminal_environment(tmp_path):
         "LC_ALL": "C.UTF-8",
         "XDG_CONFIG_HOME": str(tmp_path / "xdg configuration"),
     }
-    for key in ("KT_MCP_TOKEN", "TUNNEL_TOKEN", "PYTHONHOME", "PYTHONSTARTUP"):
+    for key in (
+        "KT_MCP_TOKEN",
+        "TUNNEL_TOKEN",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "NO_COLOR",
+    ):
         environment.pop(key, None)
     return environment
 
@@ -180,29 +221,75 @@ def onboarding(tmp_path):
 
 
 def accept_workspace_and_port(terminal):
-    terminal.expect("Workspace directory [")
+    terminal.expect("Workspace [")
     terminal.send("\n")
-    terminal.expect("Local HTTP port [")
+    terminal.expect("Port [")
     terminal.send("\n")
-    terminal.expect("Connection mode (")
+    terminal.expect("Mode [")
+
+
+@pytest.mark.parametrize(
+    "term,no_color,expected_bold,expected_color",
+    [
+        ("xterm-256color", False, True, True),
+        ("xterm-256color", True, True, False),
+        ("dumb", False, False, False),
+        ("kt-mcp-test-unsupported", False, False, False),
+    ],
+    ids=["color-terminal", "no-color", "dumb-terminal", "unsupported-terminal"],
+)
+def test_setup_styles_the_current_question_in_a_real_terminal(
+    tmp_path, term, no_color, expected_bold, expected_color
+):
+    workspace = tmp_path / "style project 中文"
+    workspace.mkdir()
+    config = tmp_path / "new configuration" / "config.json"
+    environment = terminal_environment(tmp_path)
+    environment["TERM"] = term
+    if no_color:
+        environment["NO_COLOR"] = "1"
+    terminal = TerminalSession(
+        ["init", "--config", str(config)], cwd=workspace, environment=environment
+    )
+    try:
+        terminal.expect(f"Workspace [{workspace}]: ")
+        for label in ("Kohaku KT MCP · Setup", "Workspace", str(workspace)):
+            bold, color = terminal.attributes_at(label)
+            assert bold is expected_bold
+            if label == "Workspace":
+                assert color is None
+            else:
+                assert (color is not None) is expected_color
+        # Styling must reset before the input area and the ordinary help text.
+        assert terminal.attributes_at("Enter = default") == (False, None)
+        assert terminal.attributes_at("]: ") == (False, None)
+        if not expected_bold:
+            assert b"\x1b" not in terminal.output
+
+        terminal.send(":q\n")
+        terminal.expect("Setup cancelled; no configuration was saved.")
+        terminal.finish()
+        assert not config.parent.exists()
+    finally:
+        terminal.close()
 
 
 def test_first_run_uses_current_directory_and_recovers_from_invalid_port(onboarding):
     terminal, workspace, config = onboarding
-    terminal.expect(
-        "Current directory where this command was started: " + str(workspace)
-    )
-    terminal.expect("Workspace directory [")
+    terminal.expect(f"Workspace [{workspace}]: ")
     terminal.send("\n")
-    terminal.expect("Local HTTP port [")
+    terminal.expect("Port [")
     terminal.send("not-a-port\n")
     terminal.expect("Port must be an integer from 1 to 65535.")
-    terminal.expect("Local HTTP port [")
+    assert terminal.attributes_at("Port must be an integer")[1] is not None
+    terminal.expect("Port [")
     terminal.send("9123\n")
-    terminal.expect("Connection mode (")
+    terminal.expect("Mode [")
     terminal.send("\n")
-    terminal.expect("Review configuration before saving")
-    terminal.expect("Save configuration?")
+    terminal.expect("Review")
+    terminal.expect("Save? [")
+    assert terminal.attributes_at("Review")[0]
+    assert terminal.attributes_at("Save?")[0]
     assert not config.exists()
     assert not config.parent.exists()
 
@@ -225,7 +312,7 @@ def test_cancelling_at_summary_creates_no_configuration_or_directories(
     before = set(tmp_path.rglob("*"))
     accept_workspace_and_port(terminal)
     terminal.send("\n")
-    terminal.expect("Save configuration?")
+    terminal.expect("Save? [")
     assert not config.exists()
     assert not config.parent.exists()
     terminal.send(":q\n")
@@ -241,12 +328,12 @@ def test_named_tunnel_secret_is_hidden_in_a_real_terminal(onboarding, tmp_path):
     before = set(tmp_path.rglob("*"))
     accept_workspace_and_port(terminal)
     terminal.send("named\n")
-    terminal.expect("Public HTTPS origin")
+    terminal.expect("HTTPS origin")
     terminal.send("https://mcp.example.com\n")
-    terminal.expect("Cloudflare Tunnel token (hidden): ")
+    terminal.expect("Tunnel token (hidden): ")
     tunnel_token = "test-only-" + secrets.token_urlsafe(32)
     terminal.send(tunnel_token + "\n")
-    terminal.expect("Save configuration?")
+    terminal.expect("Save? [")
     terminal.assert_hidden(tunnel_token)
     assert not config.exists()
     terminal.send(":q\n")
@@ -269,21 +356,20 @@ def test_interactive_init_preserves_port_option_and_defaults_to_current_director
         environment=terminal_environment(tmp_path),
     )
     try:
-        terminal.expect(
-            "Current directory where this command was started: " + str(workspace)
-        )
-        terminal.expect("Workspace directory [")
+        terminal.expect(f"Workspace [{workspace}]: ")
         terminal.send("\n")
-        terminal.expect("Local HTTP port [9876]: ")
+        terminal.expect("Port [9876]: ")
         terminal.send("\n")
-        terminal.expect("Connection mode (")
+        terminal.expect("Mode [")
         terminal.send("\n")
-        terminal.expect("Save configuration?")
+        terminal.expect("Save? [")
         assert not config.exists()
         assert not config.parent.exists()
 
         terminal.send("\n")
-        terminal.expect("Private configuration created:")
+        terminal.expect("Saved ")
+        bold, color = terminal.attributes_at("Saved")
+        assert bold and color is not None
         terminal.finish()
         settings = json.loads(config.read_text(encoding="utf-8"))
         assert settings["workspace"] == str(workspace.resolve())
@@ -304,10 +390,7 @@ def test_bare_terminal_command_enters_setup_and_cancels_without_writes(tmp_path)
     before = set(tmp_path.rglob("*"))
     terminal = TerminalSession([], cwd=workspace, environment=environment)
     try:
-        terminal.expect(
-            "Current directory where this command was started: " + str(workspace)
-        )
-        terminal.expect("Workspace directory [")
+        terminal.expect(f"Workspace [{workspace}]: ")
         assert not config.exists()
         terminal.send(":q\n")
         terminal.expect("Setup cancelled; no configuration was saved.")
