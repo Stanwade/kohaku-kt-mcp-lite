@@ -364,11 +364,21 @@ class ServiceManager:
     def logs(self, lines: int = 80) -> str:
         return _run(self._journal_arguments(lines))
 
-    def uninstall(self):
+    def uninstall(self, *, expected_content=None, expected_identity=None):
         self._mutating()
         previous = self._managed()
+        if expected_content is not None and previous != expected_content:
+            raise ValueError("unit changed before removal; review it again")
+        if expected_identity is not None:
+            from kt_mcp.onboarding import _file_identity
+
+            if _file_identity(self.unit_path.lstat()) != expected_identity:
+                raise ValueError("unit changed before removal; review it again")
         self._systemctl("disable", "--now", self.unit_name)
-        if self._managed() != previous:
+        if self._managed() != previous or (
+            expected_identity is not None
+            and _file_identity(self.unit_path.lstat()) != expected_identity
+        ):
             raise ValueError("unit changed during removal; inspect and retry")
         self.unit_path.unlink()
         self._systemctl("daemon-reload")

@@ -604,3 +604,183 @@ def test_authentication_interrupt_returns_to_curses_instead_of_exiting(
     assert restored == ["save", "handoff", "resume"]
     assert screen.timeouts[-1] == 250
     assert screen.clears[-1] is True
+
+
+@pytest.fixture
+def delete_plan(monkeypatch, panel):
+    plan = SimpleNamespace(
+        name=panel.manager.name,
+        config_path=panel.config_path,
+        workspace=panel.config.settings.workspace,
+        has_service=True,
+        summary=(
+            f"Instance: {panel.manager.name}\n"
+            "Stop, disable and remove its service.\n"
+            "Delete its saved configuration.\n"
+            "Workspace files will be retained.\n"
+            f"Configuration: {panel.config_path}"
+        ),
+    )
+    prepared = []
+
+    def prepare(manager, path):
+        prepared.append((manager, path))
+        return plan
+
+    monkeypatch.setattr(actions.operations, "prepare_delete_instance", prepare)
+    monkeypatch.setattr(
+        actions.operations,
+        "delete_instance",
+        lambda plan: pytest.fail("Unconfirmed deletion mutated the instance"),
+    )
+    return plan, prepared
+
+
+@pytest.mark.parametrize("key", [10, 27, "q"])
+def test_delete_confirmation_defaults_to_no_and_never_mutates(
+    monkeypatch, panel, delete_plan, key
+):
+    _plan, prepared = delete_plan
+    screen = Screen([key], height=18, width=64)
+    assert actions.delete_dialog(screen, panel) is None
+    assert prepared == [(panel.manager, panel.config_path)]
+    assert "No, return" in screen.rendered()
+    assert panel.note == "Deletion cancelled; instance unchanged."
+    assert panel.manager.calls == []
+    assert panel.refreshes == 0
+
+
+def test_delete_uses_exact_reviewed_plan_and_never_refreshes_removed_config(
+    monkeypatch, panel, delete_plan
+):
+    plan, prepared = delete_plan
+    confirmations = []
+    deleted = []
+
+    def accept(screen, title, body, *, default):
+        confirmations.append((title, body, default))
+        return True
+
+    menu_answers(monkeypatch, ["delete"])
+    monkeypatch.setattr(actions, "confirm", accept)
+    monkeypatch.setattr(actions.operations, "delete_instance", deleted.append)
+    assert actions.actions_menu(Screen(), panel) == "instances"
+    assert prepared == [(panel.manager, panel.config_path)]
+    assert deleted == [plan]
+    assert confirmations == [("Delete instance", plan.summary, False)]
+    assert panel.note == "Instance deleted; workspace files retained."
+    assert panel.refreshes == 0
+
+
+def test_delete_preflight_failure_cannot_open_confirmation_or_mutate(
+    monkeypatch, panel, messages
+):
+    menu_answers(monkeypatch, ["delete"])
+
+    def failure(*args):
+        raise ValueError("Configuration changed: " + panel.token)
+
+    monkeypatch.setattr(actions.operations, "prepare_delete_instance", failure)
+    monkeypatch.setattr(
+        actions,
+        "confirm",
+        lambda *args, **kwargs: pytest.fail("Unsafe delete confirmed"),
+    )
+    assert actions.actions_menu(Screen(), panel) is None
+    assert messages == [
+        ("Action could not be completed", "Configuration changed: [redacted]")
+    ]
+    assert panel.manager.calls == []
+    assert panel.refreshes == 0
+
+
+def test_delete_mutation_error_keeps_panel_and_redacts_its_diagnostics(
+    monkeypatch, panel, delete_plan, messages
+):
+    menu_answers(monkeypatch, ["delete"])
+    monkeypatch.setattr(actions, "confirm", lambda *args, **kwargs: True)
+
+    def failure(plan):
+        raise ValueError("Instance changed during confirmation: " + panel.token)
+
+    monkeypatch.setattr(actions.operations, "delete_instance", failure)
+    assert actions.actions_menu(Screen(), panel) is None
+    assert messages == [
+        (
+            "Action could not be completed",
+            "Instance changed during confirmation: [redacted]",
+        )
+    ]
+    assert "deleted" not in panel.note.lower()
+    assert panel.refreshes == 0
+
+
+def test_malformed_selected_entry_offers_deletion_without_lifecycle_actions(
+    monkeypatch, panel, delete_plan
+):
+    selected = SimpleNamespace(name=panel.manager.name, config_path=panel.config_path)
+    offered = []
+
+    def select_delete(screen, title, options, **kwargs):
+        offered.extend(options)
+        assert kwargs["body"] == "Selected: " + selected.name
+        return "delete"
+
+    monkeypatch.setattr(actions, "choose", select_delete)
+    monkeypatch.setattr(actions, "ServiceManager", lambda name: panel.manager)
+    monkeypatch.setattr(actions, "confirm", lambda *args, **kwargs: True)
+    deleted = []
+    monkeypatch.setattr(actions.operations, "delete_instance", deleted.append)
+    assert actions.actions_menu(Screen(), selected=selected) == "instances"
+    assert ("delete", "Delete instance (remove configuration)") in offered
+    assert not {"start", "stop", "install", "configure"} & {key for key, _ in offered}
+    assert deleted == [delete_plan[0]]
+    assert delete_plan[1] == [(panel.manager, panel.config_path)]
+
+
+def test_system_delete_closes_only_the_authorized_panel(
+    monkeypatch, panel, delete_plan
+):
+    monkeypatch.setattr(actions.os, "geteuid", lambda: 0)
+    panel.manager.system = True
+    monkeypatch.setattr(actions, "confirm", lambda *args, **kwargs: True)
+    deleted = []
+    monkeypatch.setattr(actions.operations, "delete_instance", deleted.append)
+    assert actions.delete_dialog(Screen(), panel) == "deleted"
+    assert deleted == [delete_plan[0]]
+    assert panel.refreshes == 0
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_unprivileged_system_delete_uses_existing_explicit_admin_panel(
+    monkeypatch, panel, delete_plan, deleted
+):
+    panel.manager.system = True
+    panel.manager.unit_path = panel.config_path.with_suffix(".service")
+    panel.config_path.write_text("test-owned configuration", encoding="utf-8")
+    panel.manager.unit_path.write_text("test-owned unit", encoding="utf-8")
+    opened = []
+
+    def administrator(screen, path, name):
+        opened.append((path, name))
+        if deleted:
+            path.unlink()
+            panel.manager.unit_path.unlink()
+
+    monkeypatch.setattr(actions, "_admin_panel", administrator)
+    result = actions.delete_dialog(Screen(), panel)
+    assert result == ("deleted" if deleted else None)
+    assert opened == [(panel.config_path, panel.manager.name)]
+    assert delete_plan[1] == []
+    assert panel.config_path.exists() is not deleted
+    assert panel.manager.unit_path.exists() is not deleted
+
+
+def test_delete_without_selection_does_not_prepare_or_authenticate(monkeypatch):
+    monkeypatch.setattr(
+        actions.operations,
+        "prepare_delete_instance",
+        lambda *args: pytest.fail("Missing selection reached the backend"),
+    )
+    with pytest.raises(ValueError, match="No instance selected"):
+        actions.delete_dialog(Screen())

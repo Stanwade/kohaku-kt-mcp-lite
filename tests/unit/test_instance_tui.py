@@ -762,3 +762,150 @@ def test_boot_shortcuts_require_the_shared_configuration_binding(
     )
     panel.act(key)
     assert calls == [(panel.manager, panel.config_path, action)]
+
+
+@pytest.mark.parametrize("key", [ord("D"), 330])
+def test_detail_delete_shortcuts_use_confirmation_and_return_to_instances(
+    overview, monkeypatch, key
+):
+    from kt_mcp import tui_actions
+
+    calls = []
+    panel = overview.controller.selected_controller()
+
+    def delete(screen, selected):
+        calls.append(selected)
+        return "instances"
+
+    monkeypatch.setattr(tui_actions, "delete_dialog", delete)
+    assert tui._screen(Screen([key], height=18, width=64), panel) == "instances"
+    assert calls == [panel]
+    assert all(not manager.calls for manager in overview.managers.values())
+
+
+def test_lowercase_d_still_disables_startup_instead_of_deleting(overview, monkeypatch):
+    from kt_mcp import tui_actions
+
+    panel = overview.controller.selected_controller()
+    settings = []
+    monkeypatch.setattr(
+        tui,
+        "service_setting",
+        lambda manager, path, operation: settings.append((manager, path, operation)),
+    )
+    monkeypatch.setattr(
+        tui_actions,
+        "delete_dialog",
+        lambda *args: pytest.fail("lowercase d became a delete action"),
+    )
+    tui._screen(Screen([ord("d"), ord("q")]), panel)
+    assert settings == [(panel.manager, panel.config_path, "disable")]
+
+
+def test_overview_delete_refreshes_selection_and_drops_removed_controller(
+    overview, monkeypatch
+):
+    from kt_mcp import tui_actions
+
+    selected = overview.controller.selected_controller()
+    untouched = overview.paths["kt-mcp-b"].read_bytes()
+    deleted = []
+
+    def delete(screen, panel, *, selected=None):
+        deleted.append(panel.manager.name)
+        panel.config_path.unlink()
+        panel.note = "Instance deleted; workspace files retained."
+        return "instances"
+
+    monkeypatch.setattr(tui_actions, "delete_dialog", delete)
+    screen = Screen([ord("D"), ord("q")], height=18, width=64)
+    module.instance_screen(screen, overview.controller)
+    assert deleted == ["kt-mcp-a"]
+    assert [item.name for item in overview.controller.items] == ["kt-mcp-b"]
+    assert overview.controller.selected.name == "kt-mcp-b"
+    assert "kt-mcp-a" not in overview.controller._panels
+    assert overview.paths["kt-mcp-b"].read_bytes() == untouched
+    assert "workspace files retained" in overview.controller.note
+    assert all(not manager.calls for manager in overview.managers.values())
+    assert "[D] Delete" in all_text(screen)
+    assert selected.config.settings.workspace
+
+
+def test_invalid_selected_configuration_can_reach_delete_actions(overview, monkeypatch):
+    from kt_mcp import tui_actions
+
+    path = instances.config_path("broken")
+    path.write_text("{invalid-json", encoding="utf-8")
+    path.chmod(0o600)
+    controller = overview.controller
+    controller.refresh()
+    controller.select("kt-mcp-broken")
+    routed = []
+
+    def actions(screen, panel=None, *, selected=None):
+        routed.append((panel, selected))
+        assert selected.config_path == path
+
+    monkeypatch.setattr(tui_actions, "actions_menu", actions)
+    module.instance_screen(Screen([ord("a"), ord("q")]), controller)
+    assert len(routed) == 1
+    assert routed[0][0] is None
+    assert routed[0][1].error
+    assert path.exists()
+
+
+def test_invalid_selected_configuration_can_reach_delete_shortcut(
+    overview, monkeypatch
+):
+    from kt_mcp import tui_actions
+
+    path = instances.config_path("broken")
+    path.write_text("{invalid-json", encoding="utf-8")
+    path.chmod(0o600)
+    controller = overview.controller
+    controller.refresh()
+    controller.select("kt-mcp-broken")
+    routed = []
+
+    def delete(screen, panel=None, *, selected=None):
+        routed.append((panel, selected))
+
+    monkeypatch.setattr(tui_actions, "delete_dialog", delete)
+    module.instance_screen(Screen([ord("D"), ord("q")]), controller)
+    assert len(routed) == 1
+    assert routed[0][0] is None
+    assert routed[0][1].config_path == path
+    assert controller.note == "Deletion cancelled; instance unchanged."
+    assert path.exists()
+
+
+def test_deleted_system_explicit_panel_does_not_open_root_catalog(
+    overview, monkeypatch
+):
+    panel = overview.controller.selected_controller()
+    panel.manager.system = True
+    monkeypatch.setattr(tui, "_screen", lambda *args: "deleted")
+    monkeypatch.setattr(
+        module,
+        "instance_screen",
+        lambda *args, **kwargs: pytest.fail("system deletion entered the root catalog"),
+    )
+    assert module.single_screen(Screen([]), panel) is None
+
+
+def test_deleted_user_explicit_panel_returns_to_overview_with_result(
+    overview, monkeypatch
+):
+    panel = overview.controller.selected_controller()
+    panel.note = "Instance deleted; workspace files retained."
+    monkeypatch.setattr(tui, "_screen", lambda *args: "instances")
+    routed = []
+    monkeypatch.setattr(
+        module,
+        "instance_screen",
+        lambda screen, controller, **kwargs: routed.append((controller, kwargs)),
+    )
+    module.single_screen(Screen([]), panel)
+    assert len(routed) == 1
+    assert routed[0][0].note == panel.note
+    assert routed[0][1] == {"initial_action": "instances"}

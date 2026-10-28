@@ -71,6 +71,18 @@ def uninstall_service(manager, config_path):
     manager.uninstall()
 
 
+def prepare_delete_instance(manager, config_path, *, system=False):
+    from kt_mcp.instance_delete import prepare_delete_instance as prepare
+
+    return prepare(manager, config_path, system=system)
+
+
+def delete_instance(plan):
+    from kt_mcp.instance_delete import delete_instance as remove
+
+    return remove(plan)
+
+
 def instance_metadata():
     return [
         {**asdict(item), "config_path": str(item.config_path)}

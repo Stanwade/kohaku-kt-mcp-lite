@@ -452,7 +452,7 @@ def verify_tui(cli, config, name, *, cwd, environment, url):
 
 
 def verify_native_creation(cli, *, cwd, environment):
-    """Create through the installed launcher, with no editable package or test stub."""
+    """Create and delete through the installed launcher, without an editable package."""
     import fcntl
     import pty
     import termios
@@ -460,6 +460,8 @@ def verify_native_creation(cli, *, cwd, environment):
     name = "kt-mcp-wheel-" + uuid.uuid4().hex[:10]
     workspace = cwd / "native workspace 中文"
     workspace.mkdir()
+    marker = workspace / "keep-project.txt"
+    marker.write_text("Project files survive instance deletion.\n", encoding="utf-8")
     config_home = cwd / "native-tui-configuration"
     target = config_home / "kt-mcp/instances" / (name + ".json")
     port = available_port()
@@ -562,12 +564,75 @@ def verify_native_creation(cli, *, cwd, environment):
             "installed native creation registered a service after declining Start",
         )
         native()
+        before = target.read_bytes()
+        os.write(master, b"D")
+        expect("Delete instance")
+        expect("No, return")
+        os.write(master, b"\n")
+        expect("Selected: " + name)
+        require(
+            target.read_bytes() == before,
+            "installed deletion changed configuration after accepting default No",
+        )
+        os.write(master, b"D")
+        expect("Delete instance")
+        expect("No, return")
+        os.write(master, b"j\n")
+        expect("No instances yet.")
+        require(not target.exists(), "installed native deletion retained configuration")
+        require(
+            marker.read_text(encoding="utf-8")
+            == "Project files survive instance deletion.\n",
+            "installed native deletion changed workspace files",
+        )
+        native()
         os.write(master, b"q")
         require(
-            process.wait(timeout=10) == 0, "installed creation TUI did not exit cleanly"
+            process.wait(timeout=10) == 0,
+            "installed creation/deletion TUI did not exit cleanly",
+        )
+        command(
+            [
+                cli,
+                "instance",
+                "create",
+                name,
+                "--workspace",
+                workspace,
+                "--port",
+                str(port),
+            ],
+            cwd=cwd,
+            environment=terminal_environment,
+        )
+        require(target.exists(), "deleted name, workspace and port could not be reused")
+        command(
+            [cli, "instance", "delete", name, "--yes"],
+            cwd=cwd,
+            environment=terminal_environment,
+        )
+        require(not target.exists(), "installed CLI deletion retained configuration")
+        require(
+            not json.loads(
+                command(
+                    [cli, "instance", "list", "--json"],
+                    cwd=cwd,
+                    environment=terminal_environment,
+                )
+            ),
+            "installed deletion left a dangling catalog row",
+        )
+        require(
+            marker.read_text(encoding="utf-8")
+            == "Project files survive instance deletion.\n",
+            "installed CLI deletion changed workspace files",
         )
         return {
             "created_through_installed_launcher": True,
+            "deleted_through_installed_tui_and_cli": True,
+            "deletion_default_no_preserved_configuration": True,
+            "deleted_resources_reusable": True,
+            "workspace_retained": True,
             "native_curses": True,
             "terminal": "64x18",
             "workspace_port_mode_verified": True,

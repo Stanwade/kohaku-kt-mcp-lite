@@ -322,7 +322,13 @@ def _check_loaded(status: dict[str, str], path: Path):
 
 
 def _inspect(
-    name, system, *, expected_python=None, expected_config=None, timeout=COMMAND_TIMEOUT
+    name,
+    system,
+    *,
+    expected_python=None,
+    expected_config=None,
+    timeout=COMMAND_TIMEOUT,
+    for_removal=False,
 ):
     _linux()
     _name(name)
@@ -352,19 +358,20 @@ def _inspect(
         and config_path.resolve() != _absolute(expected_config).resolve()
     ):
         raise ManagedServiceError("Service belongs to another configuration")
-    config = _private_json(config_path, account.pw_uid)
-    workspace = config.get("workspace")
-    if (
-        type(config.get("version")) is not int
-        or config["version"] != 1
-        or not isinstance(workspace, str)
-        or not Path(workspace).is_absolute()
-        or not Path(workspace).is_dir()
-        or _literal(service["WorkingDirectory"][0]) != str(_absolute(workspace))
-    ):
-        raise ManagedServiceError(
-            "Service working directory does not match its configuration"
-        )
+    if not for_removal:
+        config = _private_json(config_path, account.pw_uid)
+        workspace = config.get("workspace")
+        if (
+            type(config.get("version")) is not int
+            or config["version"] != 1
+            or not isinstance(workspace, str)
+            or not Path(workspace).is_absolute()
+            or not Path(workspace).is_dir()
+            or _literal(service["WorkingDirectory"][0]) != str(_absolute(workspace))
+        ):
+            raise ManagedServiceError(
+                "Service working directory does not match its configuration"
+            )
     environment = service["Environment"]
     quoted = [_words(value) for value in environment if value.startswith('"')]
     if (
@@ -407,13 +414,33 @@ def inspect_service(
     )
 
 
-def _refresh(binding: BoundService, timeout=COMMAND_TIMEOUT) -> BoundService:
+def inspect_removal_service(
+    name="kt-mcp", system=False, *, expected_python=None, expected_config=None
+) -> BoundService | None:
+    """Verify a generated unit for deletion even if its configuration is damaged.
+
+    The caller must independently validate the configuration file ownership and
+    snapshot before unlinking it. This binding must never be used to start a unit.
+    """
+    return _inspect(
+        name,
+        system,
+        expected_python=expected_python,
+        expected_config=expected_config,
+        for_removal=True,
+    )
+
+
+def _refresh(
+    binding: BoundService, timeout=COMMAND_TIMEOUT, *, for_removal=False
+) -> BoundService:
     current = _inspect(
         binding.name,
         binding.system,
         expected_python=binding.python,
         expected_config=binding.config_path,
         timeout=timeout,
+        for_removal=for_removal,
     )
     if current is None or (
         current.unit_bytes != binding.unit_bytes
@@ -451,6 +478,16 @@ def _pid(status: dict[str, str]) -> int:
 def assert_external_process(binding: BoundService, *, timeout=40) -> None:
     """Refuse to stop a unit containing this process, including nested cgroups."""
     current = _refresh(binding, timeout)
+    _assert_external_binding(current)
+
+
+def assert_removal_external(binding: BoundService, *, timeout=40) -> None:
+    """Apply the same process/cgroup protection to a removal-only binding."""
+    current = _refresh(binding, timeout, for_removal=True)
+    _assert_external_binding(current)
+
+
+def _assert_external_binding(current: BoundService) -> None:
     pid = _pid(current.status)
     group = current.status.get("ControlGroup", "")
     if not group and not pid:

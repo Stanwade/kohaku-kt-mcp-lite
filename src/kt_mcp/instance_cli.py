@@ -56,6 +56,25 @@ def main(argv=None) -> int:
     create.add_argument(
         "--start", action="store_true", help="Register and start only the new instance"
     )
+    delete = commands.add_parser(
+        "delete",
+        help="Delete one instance and its configuration; retain workspace files",
+    )
+    delete.add_argument("name")
+    delete.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Confirm deletion without an interactive prompt",
+    )
+    delete.add_argument(
+        "--config", type=Path, help="Delete an explicitly selected configuration"
+    )
+    delete.add_argument(
+        "--system",
+        action="store_true",
+        help="Delete a system instance (requires administrator privileges)",
+    )
     for action, explanation in (
         ("start", "Register if needed, then start the selected instance"),
         ("stop", "Stop only the selected instance"),
@@ -132,6 +151,40 @@ def main(argv=None) -> int:
                 print(
                     "Start: " + shlex.join(["kt-mcp", "instance", "start", item.name])
                 )
+            return 0
+        if arguments.command == "delete":
+            if not arguments.yes and not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise instances.InstanceError(
+                    "Deletion needs confirmation in an interactive terminal; use --yes for noninteractive deletion."
+                )
+            name = instances.canonical_name(arguments.name)
+            path = arguments.config
+            if path is None and arguments.system:
+                binding = managed_service.inspect_removal_service(name, True)
+                if binding is None:
+                    raise instances.InstanceError(
+                        "Use --config PATH to select an unregistered system instance."
+                    )
+                path = binding.config_path
+            elif path is None:
+                path = instances.get_instance(name).config_path
+            plan = operations.prepare_delete_instance(
+                name, path, system=arguments.system
+            )
+            print(plan.summary)
+            if not arguments.yes:
+                try:
+                    confirmed = input("Delete instance? [y/N]: ").strip().lower() in {
+                        "y",
+                        "yes",
+                    }
+                except (EOFError, KeyboardInterrupt):
+                    confirmed = False
+                if not confirmed:
+                    print("Deletion cancelled; no changes made.")
+                    return 0
+            operations.delete_instance(plan)
+            print(f"Deleted {plan.name}; workspace files retained.")
             return 0
         item = _selected(arguments.name)
         if arguments.command in {"link", "client-config"}:

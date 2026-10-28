@@ -538,10 +538,11 @@ class TerminalController:
             "u views or exports the MCP link; c views or exports client JSON.",
             "l opens redacted logs; v shows service details.",
             "e enables automatic startup; d disables it without stopping the service.",
-            "Use a for installation options, uninstall, linger, exports, updates and recovery.",
+            "D or Delete removes this instance after confirmation; workspace files stay.",
+            "Use a for installation, uninstall, deletion, linger, exports, updates and recovery.",
             "",
             "Up/Down/PgUp/PgDn scroll long links and viewers.",
-            "Uppercase shortcut keys work too.",
+            "Uppercase shortcut keys work too, except D deletes and d disables startup.",
             "A configured link does not mean the service is running.",
             "Startup evidence does not continuously test public reachability.",
         ]
@@ -848,7 +849,7 @@ def _screen(screen, controller: TerminalController):
                 link_lines[link_offset : link_offset + link_page], 6
             ):
                 _put(screen, row, 2, line, styles["link" if link else "muted"])
-            link_hint = "[o] Configure [u] Link [l] Logs [?] Help"
+            link_hint = "[o] Configure [u] Link [l] Logs [D] Delete [?] Help"
             if len(link_lines) > link_page:
                 link_hint = (
                     f"Lines {link_offset + 1}-{link_offset + link_page}/{len(link_lines)}"
@@ -911,13 +912,16 @@ def _screen(screen, controller: TerminalController):
             }
             link_offset += movement[key]
             continue
-        if key < 0 or key > 255:
+        if key in (ord("D"), curses.KEY_DC):
+            character = "delete"
+        elif 0 <= key <= 255:
+            character = chr(key).lower()
+        else:
             continue
-        character = chr(key).lower()
-        if character not in "naboisxredglcuv?":
+        if character != "delete" and character not in "naboisxredglcuv?":
             continue
         previous_note = controller.note
-        if character not in "nabv?oulcig":
+        if character != "delete" and character not in "nabv?oulcig":
             controller.note = "Working..."
             _put(screen, height - 1, 1, controller.note)
             screen.refresh()
@@ -937,6 +941,10 @@ def _screen(screen, controller: TerminalController):
                     return "new" if character == "n" else "instances"
             elif character == "a":
                 destination = tui_actions.actions_menu(screen, controller)
+                if destination is not None:
+                    return destination
+            elif character == "delete":
+                destination = tui_actions.delete_dialog(screen, controller)
                 if destination is not None:
                     return destination
             elif character == "o":

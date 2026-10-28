@@ -1,3 +1,27 @@
+# v0.3.2 — Delete instances from CLI and TUI
+
+增加独立的删除实例功能。此前的 Uninstall 只移除服务并保留配置，因此实例仍会显示在统一列表中；这次保留原卸载行为，并增加明确的 Delete 操作。
+
+## 删除入口
+
+- 统一列表与详情均可按大写 `D`（Shift+D）/ Delete，或打开 **Actions → Delete instance (remove configuration)**。小写 `d` 继续表示取消自启动。
+- CLI 使用 `kt-mcp instance delete NAME`，交互确认默认 No；自动化脚本显式添加 `--yes`。`--config PATH` 和 `--system` 支持显式配置与系统作用域。
+- 确认前显示实例名称、配置位置及影响范围；取消不改变服务或配置。确认后停止、取消自启动并移除所选托管服务，再删除配置和对应运行状态，刷新列表。未启动过的实例同样可以删除。
+- **workspace 中的项目文件保留**。操作不删除其他实例，不改变账户 linger，也不删除远端 Cloudflare Tunnel/DNS 配置。
+
+## 一致的行为
+
+- CLI 与 TUI 使用同一删除后端，验证所选配置与服务绑定；无法确认归属、共用配置或文件发生变化时拒绝删除。
+- 服务停止或移除失败时保留配置，避免留下无法管理的运行服务。
+- 删除释放该配置保留的实例名、工作区和端口；重新创建仍须通过正常冲突检查。
+- **Uninstall service (keep configuration)** 保留配置和访问令牌，适用于稍后重新 Start 的场景；**Delete instance** 从统一列表移除实例。
+
+## 验证
+
+新增真实 64×18 PTY 取消与删除测试，覆盖总览、详情、默认实例、显式路径及损坏配置；真实 user/system 服务测试检查目标清理、workspace 保留和另一实例持续响应。安装包验收实际操作删除入口并检查名称、workspace 和端口复用，保留全部 MCP 工具、升级及失败回滚门禁。增加配置/服务快照变化、状态文件路径冲突和前台 daemon 独立 HOME/XDG 路由的回归检查。
+
+---
+
 # v0.3.1 — Complete management inside the TUI
 
 修复统一管理入口与详情页之间的新建断点，并将管理操作接到 CLI/TUI 共用后端。

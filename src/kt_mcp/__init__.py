@@ -1,3 +1,3 @@
 """Kohaku KT MCP: standalone tools derived from KohakuTerrarium."""
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"

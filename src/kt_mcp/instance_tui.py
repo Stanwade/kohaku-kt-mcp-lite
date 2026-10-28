@@ -196,7 +196,7 @@ def _new_instance(screen, controller, workspace=None):
 def _navigate(screen, controller, destination):
     """Handle global navigation from a detail panel without nesting panel loops."""
     while destination is not None:
-        if destination == "instances":
+        if destination in {"instances", "deleted"}:
             return
         if destination == "new":
             _new_instance(screen, controller)
@@ -221,10 +221,13 @@ def single_screen(screen, panel):
         if isinstance(destination, tui.TerminalController):
             panel = destination
             continue
+        if destination == "deleted":
+            return
         if destination is not None:
             controller = InstanceManagerController(
                 selected_name=None if panel.manager.system else panel.manager.name
             )
+            controller.note = panel.note
             instance_screen(screen, controller, initial_action=destination)
         return
 
@@ -243,6 +246,8 @@ def manager_help():
         "u opens the link/export viewer; c opens client JSON; l opens redacted logs.",
         "Start does not enable automatic startup or user linger.",
         "Use a to choose installation, automatic startup and linger options.",
+        "D or Delete removes the selected instance after confirmation; workspace files stay.",
+        "Uninstall service keeps the saved configuration; Delete instance removes it.",
         "",
         "New instances are saved before an optional Start now confirmation.",
         "Esc cancels a dialog. Unsaved configuration changes are discarded.",
@@ -389,7 +394,7 @@ def instance_screen(
                 screen,
                 height - 3,
                 2,
-                "[n] New [a] Actions [b] Instances [?] Help [q] Quit",
+                "[n] New [a] Actions [D] Delete [b] List [?] Help [q] Quit",
                 styles["muted"],
             )
             tui._put(
@@ -421,13 +426,16 @@ def instance_screen(
                 }[key]
             )
             continue
-        if key in (10, 13, curses.KEY_ENTER):
+        if key in (ord("D"), curses.KEY_DC):
+            character = "delete"
+        elif key in (10, 13, curses.KEY_ENTER):
             character = "enter"
         elif 0 <= key <= 255:
             character = chr(key).lower()
         else:
             continue
         if character not in {
+            "delete",
             "enter",
             "n",
             "a",
@@ -456,7 +464,29 @@ def instance_screen(
                     panel = controller.selected_controller()
                 except ValueError:
                     panel = None
-                destination = tui_actions.actions_menu(screen, panel)
+                destination = (
+                    tui_actions.actions_menu(screen, selected=controller.selected)
+                    if panel is None and controller.selected is not None
+                    else tui_actions.actions_menu(screen, panel)
+                )
+                if panel is not None and panel.note:
+                    controller.note = f"{panel.manager.name}: {panel.note}"
+                if destination is not None:
+                    _navigate(screen, controller, destination)
+            elif character == "delete":
+                try:
+                    panel = controller.selected_controller()
+                except ValueError:
+                    panel = None
+                destination = tui_actions.delete_dialog(
+                    screen, panel, selected=controller.selected
+                )
+                if panel is not None and panel.note:
+                    controller.note = f"{panel.manager.name}: {panel.note}"
+                elif destination is not None and controller.selected is not None:
+                    controller.note = f"{controller.selected.name}: instance deleted; workspace files retained."
+                else:
+                    controller.note = "Deletion cancelled; instance unchanged."
                 if destination is not None:
                     _navigate(screen, controller, destination)
             elif character == "?":

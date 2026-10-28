@@ -32,6 +32,7 @@ INSTANCE_ACTIONS = [
     ("configure", "Configure instance"),
     ("install", "Install / rebuild service"),
     ("uninstall", "Uninstall service (keep configuration)"),
+    ("delete", "Delete instance (remove configuration)"),
     ("enable", "Enable automatic startup"),
     ("disable", "Disable automatic startup"),
     ("linger", "Enable user linger"),
@@ -681,7 +682,37 @@ def run_foreground(screen, panel):
         screen.clearok(True)
 
 
-def actions_menu(screen, panel=None):
+def delete_dialog(screen, panel=None, *, selected=None):
+    """Confirm the shared deletion plan without requiring a valid configuration."""
+    if panel is not None:
+        manager, path = panel.manager, panel.config_path
+    elif selected is not None:
+        manager, path = ServiceManager(selected.name), selected.config_path
+    else:
+        raise ValueError("No instance selected. Choose an instance to delete.")
+    if manager.system and os.geteuid() != 0:
+        _admin_panel(screen, path, manager.name)
+        # An authenticated child panel may have completed the deletion. Do not
+        # reopen the removed configuration or enter a root user catalog.
+        if not any(
+            candidate.exists() or candidate.is_symlink()
+            for candidate in (path, manager.unit_path)
+        ):
+            panel.note = "Instance deleted; workspace files retained."
+            return "deleted"
+        return None
+    plan = operations.prepare_delete_instance(manager, path)
+    if not confirm(screen, "Delete instance", plan.summary, default=False):
+        if panel is not None:
+            panel.note = "Deletion cancelled; instance unchanged."
+        return None
+    operations.delete_instance(plan)
+    if panel is not None:
+        panel.note = "Instance deleted; workspace files retained."
+    return "deleted" if manager.system else "instances"
+
+
+def actions_menu(screen, panel=None, *, selected=None):
     from kt_mcp import tui
 
     options = [
@@ -697,6 +728,10 @@ def actions_menu(screen, panel=None):
         )
         if panel.manager.system and os.geteuid() != 0:
             options.append(("admin", "Authenticate for system management"))
+    elif selected is not None:
+        # Malformed saved configurations cannot construct a detail controller,
+        # but can still be safely removed after the backend validates ownership.
+        options.append(("delete", "Delete instance (remove configuration)"))
     choice = choose(
         screen,
         "Actions",
@@ -704,7 +739,11 @@ def actions_menu(screen, panel=None):
         body=(
             ("Selected: " + panel.manager.name)
             if panel is not None
-            else "Global management"
+            else (
+                ("Selected: " + selected.name)
+                if selected is not None
+                else "Global management"
+            )
         ),
     )
     if choice is None:
@@ -736,6 +775,8 @@ def actions_menu(screen, panel=None):
             tui._configure(screen, panel)
         elif choice == "install":
             install_dialog(screen, panel)
+        elif choice == "delete":
+            return delete_dialog(screen, panel, selected=selected)
         elif choice == "uninstall":
             if confirm(
                 screen,

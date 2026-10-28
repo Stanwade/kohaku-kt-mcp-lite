@@ -3,7 +3,7 @@
 KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI、Linux TUI / systemd 管理和 Cloudflare Tunnel 自动接入。
 
 Linux / Ubuntu 用户可用下方在线命令安装，或在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 手动下载安装包。首次使用按 [Ubuntu 指南](UBUNTU.md) 进入项目目录并运行 `kt-mcp`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
-Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.3.1 提供按目录选择独立实例、原生 TUI 新建/配置/完整操作菜单和界面内更新；CLI 与 TUI 共享管理操作，每个实例独立配置端口及接入方式；继续提供 `kt-mcp update`、在线安装、Linux 安装包、通用 Python wheel 和源码包。
+Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.3.2 增加 CLI/TUI 共用的实例删除，保留原生 TUI 新建、配置、完整操作菜单和界面内更新；CLI 与 TUI 共享管理操作，每个实例独立配置端口及接入方式；继续提供 `kt-mcp update`、在线安装、Linux 安装包、通用 Python wheel 和源码包。
 源码安装、客户端连接和自行打包的方法见下文。
 
 A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
@@ -35,8 +35,10 @@ kt-mcp
 
 安装管道只完成软件安装。在不同项目目录运行 `kt-mcp` 时，会按目录的真实路径选择已有实例；首次进入一个新目录时，向导创建独立配置，推荐一个未被占用或预留的端口。Enter 使用默认值，也可修改工作区、端口及 local/quick/named 接入方式，保存前可返回修改或取消。重复进入同一目录会选中同一个实例。
 
-运行 `kt-mcp tui` 查看全部用户实例，用上下键选择，Enter 进入详情。总览和详情都提供 **`n` 新建、`a` 全部操作、`b` 实例列表**。新建在原生表单中填写名称、工作区、端口及接入方式，保存后可选择立即启动；普通 `s` 与 CLI `instance start` 一致，只注册并启动，不隐式开启自启动或 linger。`a` 菜单可选择安装参数、自启动、linger、卸载、日志、导出、系统服务授权和软件更新。详细面板显示**含 MCP 访问令牌的完整连接地址**；`u` / `c` 查看链接或客户端 JSON，视图内按 `w` 保存完整文件；`l` 可跟随脱敏日志并选择条数。`q` 返回或退出，后台服务继续运行。
+运行 `kt-mcp tui` 查看全部用户实例，用上下键选择，Enter 进入详情。总览和详情都提供 **`n` 新建、`a` 全部操作、`b` 实例列表、`D` 删除所选实例**。新建在原生表单中填写名称、工作区、端口及接入方式，保存后可选择立即启动；普通 `s` 与 CLI `instance start` 一致，只注册并启动，不隐式开启自启动或 linger。`a` 菜单可选择安装参数、自启动、linger、卸载服务、删除实例、日志、导出、系统服务授权和软件更新。详细面板显示**含 MCP 访问令牌的完整连接地址**；`u` / `c` 查看链接或客户端 JSON，视图内按 `w` 保存完整文件；`l` 可跟随脱敏日志并选择条数。`q` 返回或退出，后台服务继续运行。
 按 `o` **Configure** 可修改选中实例的工作区、端口、接入方式及固定域名设置。面板先提醒并确认暂停该实例，确认后停止它再进入编辑；保存或取消后保持停止，按 `s` 启动，其他实例继续运行。已有 MCP 访问令牌保留，修改工作区会同步更新 systemd 工作目录。Review 中选择 `advanced` 可配置 cloudflared 路径和文件工具访问范围；保存冲突会保留输入并允许修改。完整入口对照见 [CLI/TUI 功能矩阵](docs/TUI_PARITY.md)。
+删除实例可在总览或详情按大写 `D`（Shift+D），或选择 **Actions → Delete instance (remove configuration)**。确认默认为 No；确认后只停止并卸载所选服务，删除它的配置和运行状态，实例从列表中消失，**workspace 中的项目文件保留**。`Uninstall service (keep configuration)` 仍保留配置，实例还会显示在列表中。命令行入口是 `kt-mcp instance delete 名称`；脚本显式传 `--yes` 可跳过确认。小写 `d` 仍是取消自启动。
+
 也可直接创建两个实例（项目路径必须已存在）：
 
 ```bash

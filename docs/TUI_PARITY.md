@@ -2,7 +2,9 @@
 
 This document maps the public management commands to their terminal interface
 entry points. The instance overview and the instance detail page both expose
-`n` (new instance), `a` (all actions), and `b` (all instances). The actions
+`n` (new instance), `a` (all actions), `b` (all instances), and uppercase
+`D` / Delete (delete the selected instance). Lowercase `d` still disables
+automatic startup. The actions
 menu scrolls, so its commands remain reachable at the supported 64 × 18 terminal
 size. Native forms accept Enter, `:back`, and `:q`; Esc cancels and Ctrl+U
 clears the current input. Named-tunnel secrets are masked.
@@ -43,6 +45,7 @@ the behavior exercised through a real terminal.
 | `service install --system --run-as ACCOUNT` | Open system scope, then Install / rebuild service | Uses the selected service account. Root authorization is still required for system changes. |
 | `service install --enable --now --linger --replace` | Install / rebuild service form | Options and final confirmation are explicit. As on the CLI, install with Start now also enables automatic startup; plain Start does not. |
 | `instance uninstall NAME`; `service uninstall` | Actions → Uninstall service (keep configuration) | Shared uninstall operation. Unit removal stops the service; configuration and workspace are retained. |
+| `instance delete NAME [--yes] [--config PATH] [--system]` | Uppercase `D` / Delete; Actions → Delete instance (remove configuration) | Shared deletion backend, default-No confirmation. Stops, disables and unregisters only the selected service, removes its configuration and runtime state, and refreshes the user overview (or closes an explicit system panel). Workspace files are retained. |
 | `service enable [--now]`; `service disable [--now]` | Actions → Enable/Disable automatic startup | Boot policy and immediate start/stop are separate choices. |
 | `service linger` | Actions → Enable user linger | Applies to the user account rather than one instance; explicit confirmation is required. |
 | `service status` | Detail page; Actions → Service details | Shows service scope, PID, state, boot setting and selected configuration. |
@@ -94,6 +97,34 @@ opening or starting another instance must not change the latter two settings.
 Service uninstall removes the generated unit and stops that instance. It keeps
 the saved configuration, access token and workspace files, so a later Start can
 register the same instance again.
+
+Deleting an instance is a separate operation. The confirmation identifies its
+name and configuration path and explains what will be removed. No is the default;
+cancelling makes no service or configuration change. After confirmation, the
+selected managed service is stopped, disabled and unregistered before its
+configuration and runtime state are removed. A service-removal failure keeps the
+configuration available. Deletion refreshes the user overview, including when the last
+instance is removed. Deleting from an explicit system panel closes that panel
+without opening root's user catalog. A saved instance that was never started can also be deleted.
+Workspace directories and files, other instances, account linger, and remote
+Cloudflare Tunnel/DNS resources are retained. Removing the saved configuration
+releases its name, workspace and port reservations; a new instance must still pass
+normal conflict and available-port checks.
+
+The deletion backend verifies the selected configuration and service binding,
+refuses discovered shared or ambiguous configurations and changed files, and does not kill an
+unverified foreground process. Explicit paths and system scope use the same
+operation as named instances; system changes require the existing administrator
+authorization. The CLI requires explicit `--yes` in noninteractive use and does
+not read piped protocol data as confirmation.
+
+Shared-binding discovery covers the current catalog, the service owner's default
+and configuration-derived catalog locations, the custom XDG location used by a
+live user service manager, and generated user/system units in those locations.
+It also rejects configurations whose derived startup-record paths collide.
+This is not a global inventory of arbitrary unregistered or inactive external
+catalogs. User deletion holds the normal catalog lock; system deletion uses file
+snapshots and revalidation without creating or locking a root catalog.
 
 Link and client JSON exports contain connection credentials. The dedicated
 views intentionally display them, and exported files are private. Ordinary
