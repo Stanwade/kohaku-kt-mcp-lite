@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import subprocess
@@ -657,6 +658,189 @@ def test_find_services_includes_both_scopes_without_modifying_them(
         action in {"start", "stop", "enable", "disable", "daemon-reload"}
         for _, action, _ in calls
     )
+
+
+def discovery_candidate(installation, monkeypatch, *, system=False, **overrides):
+    directories = {
+        False: installation.path.parent,
+        True: installation.root / "system",
+    }
+    directories[True].mkdir()
+    name = "kt-mcp-deleted"
+    path = directories[system] / (name + ".service")
+    missing = dict(
+        installation.status,
+        LoadState="not-found",
+        ActiveState="inactive",
+        MainPID="0",
+        FragmentPath="",
+        DropInPaths="",
+        ControlGroup="",
+        NeedDaemonReload="no",
+    )
+    missing.update(overrides)
+    statuses = {
+        (False, installation.name): installation.status,
+        (system, name): missing,
+    }
+    calls = []
+
+    def run(scope, action, *args, **kwargs):
+        calls.append((scope, action, args))
+        if action == "list-units":
+            return "".join(
+                unit + ".service listed\n"
+                for candidate_scope, unit in statuses
+                if candidate_scope == scope
+            )
+        if action == "list-unit-files":
+            return "" if scope else installation.name + ".service disabled\n"
+        assert action == "show", "Discovery attempted to change systemd state"
+        status = statuses[scope, args[-1][:-8]]
+        return "\n".join(f"{key}={value}" for key, value in status.items())
+
+    monkeypatch.setattr(module, "_unit_directory", directories.__getitem__)
+    monkeypatch.setattr(module, "_run", run)
+    return SimpleNamespace(path=path, status=missing, calls=calls, name=name)
+
+
+@pytest.mark.parametrize("system", [False, True])
+@pytest.mark.parametrize("state", ["inactive", "failed"])
+def test_discovery_ignores_only_absent_stopped_records(
+    installation, monkeypatch, system, state
+):
+    candidate = discovery_candidate(
+        installation, monkeypatch, system=system, ActiveState=state
+    )
+    before = installation.path.read_bytes(), installation.config_path.read_bytes()
+    bindings = find_services(installation.python)
+    assert [(item.name, item.system) for item in bindings] == [
+        (installation.name, False)
+    ]
+    assert not candidate.path.exists()
+    assert (
+        installation.path.read_bytes(),
+        installation.config_path.read_bytes(),
+    ) == before
+    assert all(
+        action in {"show", "list-units", "list-unit-files"}
+        for _, action, _ in candidate.calls
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ActiveState": "active"},
+        {"ActiveState": "activating"},
+        {"ActiveState": ""},
+        {"MainPID": "1234"},
+        {"MainPID": ""},
+        {"ControlGroup": "/user.slice/remaining-child"},
+        {"ControlGroup": None},
+        {"FragmentPath": "/run/systemd/transient/kt-mcp-deleted.service"},
+        {"DropInPaths": "/run/systemd/override.conf"},
+        {"NeedDaemonReload": "yes"},
+    ],
+)
+def test_discovery_refuses_missing_records_with_unresolved_state(
+    installation, monkeypatch, overrides
+):
+    candidate = discovery_candidate(installation, monkeypatch, **overrides)
+    if overrides.get("ControlGroup", "") is None:
+        candidate.status.pop("ControlGroup")
+    with pytest.raises(ManagedServiceError, match="active or unresolved") as failure:
+        find_services(installation.python)
+    assert candidate.name in str(failure.value)
+    assert all(
+        action in {"show", "list-units", "list-unit-files"}
+        for _, action, _ in candidate.calls
+    )
+
+
+@pytest.mark.parametrize("kind", ["regular", "link", "broken-link"])
+def test_discovery_does_not_skip_existing_unloaded_files(
+    installation, monkeypatch, kind
+):
+    candidate = discovery_candidate(installation, monkeypatch)
+    if kind == "regular":
+        candidate.path.write_bytes(installation.content)
+    else:
+        target = (
+            installation.path
+            if kind == "link"
+            else installation.root / "nonexistent-unit"
+        )
+        candidate.path.symlink_to(target)
+    with pytest.raises(ManagedServiceError):
+        find_services(installation.python)
+    assert candidate.path.lstat()
+    assert installation.path.read_bytes() == installation.content
+
+
+def test_discovery_refuses_unreadable_absence_check(installation, monkeypatch):
+    candidate = discovery_candidate(installation, monkeypatch)
+    original = Path.lstat
+
+    def denied(path, *args, **kwargs):
+        if path == candidate.path:
+            raise PermissionError(errno.EACCES, TOKEN, str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", denied)
+    with pytest.raises(ManagedServiceError, match="EACCES") as failure:
+        find_services(installation.python)
+    assert repr(str(candidate.path)) in str(failure.value)
+    assert TOKEN not in str(failure.value)
+
+
+def test_discovery_keeps_foreign_unloaded_unit_outside_target_installation(
+    installation, monkeypatch
+):
+    candidate = discovery_candidate(installation, monkeypatch)
+    other_python = installation.root / "other-venv/bin/python"
+    other_python.parent.mkdir(parents=True)
+    other_python.symlink_to(sys.executable)
+    candidate.path.write_text(
+        service_module.render_unit(installation.config_path, python=other_python)
+    )
+    original = candidate.path.read_bytes()
+    assert [item.name for item in find_services(installation.python)] == [
+        installation.name
+    ]
+    assert candidate.path.read_bytes() == original
+
+
+def test_discovery_still_rejects_missing_config_for_current_installation(
+    installation, monkeypatch
+):
+    discovery_candidate(installation, monkeypatch)
+    installation.config_path.unlink()
+    with pytest.raises(ManagedServiceError, match="ENOENT") as failure:
+        find_services(installation.python)
+    assert repr(str(installation.config_path)) in str(failure.value)
+
+
+@pytest.mark.parametrize("error_number", [errno.ENOENT, errno.EACCES, errno.ELOOP])
+def test_file_read_errors_identify_path_and_errno_without_raw_diagnostics(
+    tmp_path, monkeypatch, error_number
+):
+    path = tmp_path / "config\n\x1b[31m.json"
+    original = module.os.open
+
+    def fail(file, *args, **kwargs):
+        if file == path:
+            raise OSError(error_number, TOKEN, str(path))
+        return original(file, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", fail)
+    with pytest.raises(ManagedServiceError, match="regular managed") as failure:
+        module._read_regular(path)
+    message = str(failure.value)
+    assert repr(str(path)) in message
+    assert errno.errorcode[error_number] in message
+    assert TOKEN not in message
+    assert "\n" not in message and "\x1b" not in message
 
 
 @pytest.mark.parametrize("timeout", [0, -1, True, float("inf"), float("nan")])

@@ -51,7 +51,7 @@ kt-mcp
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-  bash -s -- --version 0.3.3 \
+  bash -s -- --version 0.3.4 \
     --prefix "$HOME/apps/kt-mcp" \
     --bin-dir "$HOME/.local/bin" \
     --python /usr/bin/python3
@@ -76,7 +76,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 (
   set -o pipefail
   curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-    bash -s -- --version 0.3.3
+    bash -s -- --version 0.3.4
 )
 ```
 
@@ -84,7 +84,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 
 ### 手动下载发行包
 
-从同一个 Release 下载 `kt-mcp-0.3.3-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+从同一个 Release 下载 `kt-mcp-0.3.4-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
@@ -93,8 +93,8 @@ sha256sum --ignore-missing -c SHA256SUMS
 确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
 
 ```bash
-tar -xzf kt-mcp-0.3.3-linux.tar.gz
-cd kt-mcp-0.3.3-linux
+tar -xzf kt-mcp-0.3.4-linux.tar.gz
+cd kt-mcp-0.3.4-linux
 bash ./install.sh
 ```
 
@@ -113,7 +113,7 @@ bash scripts/install_linux.sh
 本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
 
 ```bash
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.3-py3-none-any.whl
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.4-py3-none-any.whl
 ```
 
 `--source` 只用于本地安装器，在线入口不接受它。
@@ -125,7 +125,7 @@ v0.3.1 起，可直接使用 TUI 的 Actions → Software updates。命令行入
 ```bash
 kt-mcp update
 kt-mcp update --check                  # 只检查，不安装、不暂停服务
-kt-mcp update --version 0.3.3           # 指定正式版；不支持降级
+kt-mcp update --version 0.3.4           # 指定正式版；不支持降级
 kt-mcp update --name kt-mcp-dev         # 选择要恢复运行的用户实例
 ```
 
@@ -133,7 +133,7 @@ kt-mcp update --name kt-mcp-dev         # 选择要恢复运行的用户实例
 
 安装、启动失败或正常中断时会恢复原虚拟环境，包括旧依赖和额外安装的包。恢复失败会保留备份及独立恢复入口；在仍运行的 TUI 中选择 Recover interrupted update，或执行 `kt-mcp update --recover`。若机器断电或进程被强制杀死，可在原安装前缀的 `.kt-mcp-update` 中找到 `worker.py`，用原 base Python 执行 `python3 -I /原安装前缀/.kt-mcp-update/worker.py --recover`（自定义 Python 要换成原解释器）。不要手动删除未完成事务的备份。
 
-**从 v0.2.3 或更早版本首次升级**：旧 CLI 没有 `update`，新在线入口可以直接调用新版更新器，完成相同的服务暂停与恢复：
+**使用新版更新器升级**：旧版本缺少 `update`，或在检查服务文件时更新失败，可通过在线安装脚本直接运行目标版本的更新器：
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh \
@@ -350,7 +350,7 @@ kt-mcp client-config
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python scripts/build_linux.py
-.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.3-linux.tar.gz --systemd
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.4-linux.tar.gz --systemd
 ```
 
 构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。

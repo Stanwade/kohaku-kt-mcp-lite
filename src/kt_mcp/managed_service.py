@@ -4,6 +4,7 @@ This module intentionally imports no other kt_mcp modules or third-party
 packages: an updater must remain usable while its installed venv is replaced.
 """
 
+import errno
 import hashlib
 import http.client
 import json
@@ -162,6 +163,17 @@ def _status(name: str, system: bool, timeout=COMMAND_TIMEOUT) -> dict[str, str]:
     return result
 
 
+def _file_read_error(path: Path, error: OSError) -> ManagedServiceError:
+    reason = (
+        f"{errno.errorcode[error.errno]} ({os.strerror(error.errno)})"
+        if error.errno in errno.errorcode
+        else "operating system read error"
+    )
+    return ManagedServiceError(
+        f"Could not read a regular managed service file {str(path)!r}: {reason}"
+    )
+
+
 def _read_regular(path: Path, *, limit=65536):
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -173,10 +185,8 @@ def _read_regular(path: Path, *, limit=65536):
         if len(data) > limit:
             raise ManagedServiceError("Service file exceeds the supported size")
         return data, info
-    except OSError:
-        raise ManagedServiceError(
-            "Could not read a regular managed service file"
-        ) from None
+    except OSError as error:
+        raise _file_read_error(path, error) from None
 
 
 def _literal(value: str) -> str:
@@ -812,6 +822,29 @@ def find_services(python) -> list[BoundService]:
         for name in sorted(names):
             _name(name)
             path = _unit_directory(system) / (name + ".service")
+            status = _status(name, system)
+            if status["LoadState"] == "not-found":
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    # systemd can retain a stopped/failed unit after its file
+                    # is removed. Only discard a record with no live binding.
+                    if (
+                        status.get("ActiveState") in {"inactive", "failed"}
+                        and status.get("MainPID") == "0"
+                        and status.get("FragmentPath") == ""
+                        and status.get("DropInPaths") == ""
+                        and status.get("ControlGroup") == ""
+                        and status.get("NeedDaemonReload") == "no"
+                    ):
+                        continue
+                    scope = "system" if system else "user"
+                    raise ManagedServiceError(
+                        f"Missing {scope} service {name!r} has an active or unresolved "
+                        "state; inspect the service before updating"
+                    ) from None
+                except OSError as error:
+                    raise _file_read_error(path, error) from None
             data, _ = _read_regular(path)
             _, executable, _ = _parse_unit(data, system)
             if _venv(executable) != target:

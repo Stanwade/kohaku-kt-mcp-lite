@@ -1,3 +1,13 @@
+# v0.3.4 — Reliable update service discovery
+
+- 更新时识别 systemd 中已无文件、无进程的失败实例残留，继续检查当前安装使用的服务。
+- 服务文件读取失败时显示文件路径及系统错误原因。
+- 安装前检查失败时明确提示安装和服务尚未改变。
+
+旧版本更新器遇到服务文件检查错误时，可使用官方在线安装脚本的 `--update` 运行新版更新器。操作方法见 [Linux 升级指南](https://github.com/Stanwade/kohaku-kt-mcp-lite/blob/v0.3.4/UBUNTU.md#升级已有安装)。
+
+---
+
 # v0.3.3 — Responsive instance startup
 
 修复 TUI 新建实例后选择 Yes 启动时停留在确认界面的问题。

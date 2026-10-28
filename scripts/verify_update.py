@@ -24,6 +24,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -42,12 +43,16 @@ from verify_linux import (
     unpack_verified,
 )
 
-from kt_mcp import managed_service
+from kt_mcp import managed_service, releases
 from kt_mcp.service import ServiceManager
 
 RELEASES = "https://github.com/Stanwade/kohaku-kt-mcp-lite/releases"
 FIXTURES = ("9.8.7", "9.8.8", "9.8.9")
 SENTINEL = "kt_mcp_update_sentinel"
+LEGACY_VERSION = "0.3.2"
+LEGACY_ARCHIVE_SHA256 = (
+    "3b724df569ab3387e93d38708c47e4077505cac3ae2fc2621a0fe411fa1b850f"
+)
 
 
 def write_wheel(path: Path, members: dict[str, bytes], info_directory: str):
@@ -147,9 +152,17 @@ def failure_installer(original: str, prefix: Path, marker: Path) -> str:
     return original.replace('"$kt_target" --version', '"$kt_target" --version' + hook)
 
 
-def make_fixtures(bundle: Path, version: str, root: Path, prefix: Path):
+def make_fixtures(bundle: Path, version: str, root: Path, prefix: Path, archive: Path):
     source = bundle / f"kohaku_kt_mcp-{version}-py3-none-any.whl"
-    routes = {}
+    manifest = root / "current-SHA256SUMS"
+    manifest.write_text(
+        checksums({archive.name: archive, source.name: source}), encoding="ascii"
+    )
+    current = RELEASES + "/download/v" + version + "/"
+    routes = {
+        current + "SHA256SUMS": str(manifest),
+        current + archive.name: str(archive),
+    }
     marker = root / "real-install-failure"
     for target in FIXTURES:
         directory = root / ("release-" + target)
@@ -412,13 +425,208 @@ print("cancel-preserved-files")
     )
 
 
+def wait_until(predicate, message, *, timeout=20):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.1)
+    require(False, message)
+
+
+class StaleRegistration:
+    """Own one failed test unit whose file is removed while systemd retains it."""
+
+    def __init__(self, run):
+        self.manager = ServiceManager("kt-mcp-update-stale-" + uuid.uuid4().hex[:12])
+        self.run = run
+        self.identity = None
+        self.retained = None
+        self.content = (
+            b"[Unit]\nDescription=kt-mcp update regression fixture\n"
+            b"[Service]\nType=oneshot\nExecStart=/usr/bin/false\n"
+        )
+
+    def status(self):
+        return managed_service._status(self.manager.name, False)
+
+    def present(self):
+        output = managed_service._run(
+            False,
+            "list-units",
+            "--all",
+            "--plain",
+            "--no-legend",
+            self.manager.unit_name,
+        )
+        return any(
+            line.split() and line.split()[0] == self.manager.unit_name
+            for line in output.splitlines()
+        )
+
+    def command(self, *arguments, fails=False):
+        return self.run(
+            ["systemctl", "--user", "--no-ask-password", "--no-pager", *arguments],
+            fails=fails,
+            timeout=40,
+        )
+
+    def own_file(self):
+        data, info = managed_service._read_regular(self.manager.unit_path)
+        require(
+            (info.st_dev, info.st_ino, info.st_uid) == self.identity
+            and data == self.content,
+            "the temporary failed unit changed; its file was retained",
+        )
+
+    @staticmethod
+    def dormant(status):
+        return (
+            status.get("ActiveState") in {"inactive", "failed"}
+            and status.get("MainPID") == "0"
+            and status.get("ControlGroup") == ""
+        )
+
+    @classmethod
+    def absent_binding(cls, status):
+        return (
+            status.get("LoadState") == "not-found"
+            and cls.dormant(status)
+            and status.get("FragmentPath") == ""
+            and status.get("DropInPaths") == ""
+            and status.get("NeedDaemonReload") == "no"
+        )
+
+    def create(self):
+        path = self.manager.unit_path
+        initial = self.status()
+        require(
+            not path.exists()
+            and not path.is_symlink()
+            and self.absent_binding(initial)
+            and initial.get("ActiveState") == "inactive"
+            and not self.present(),
+            "the unique failed-unit test name already exists",
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            info = os.fstat(stream.fileno())
+            self.identity = (info.st_dev, info.st_ino, info.st_uid)
+            stream.write(self.content)
+        self.command("daemon-reload")
+        loaded = self.status()
+        require(
+            loaded.get("LoadState") == "loaded"
+            and loaded.get("FragmentPath") == str(path),
+            "systemd did not load the owned failed-unit fixture",
+        )
+        self.command("start", self.manager.unit_name, fails=True)
+        wait_until(
+            lambda: self.status().get("ActiveState") == "failed"
+            and self.dormant(self.status()),
+            "the temporary oneshot did not fail and exit",
+        )
+        self.own_file()
+        path.unlink()
+        self.command("daemon-reload")
+        self.retained = self.status()
+        require(
+            self.absent_binding(self.retained)
+            and self.retained.get("ActiveState") == "failed"
+            and self.present(),
+            "systemd did not retain the failed/not-found test registration",
+        )
+
+    def unchanged(self):
+        require(
+            not self.manager.unit_path.exists()
+            and not self.manager.unit_path.is_symlink()
+            and self.status() == self.retained
+            and self.present(),
+            "the updater changed the unrelated failed/not-found registration",
+        )
+
+    def cleanup(self):
+        if self.identity is None:
+            return
+        path = self.manager.unit_path
+        wait_until(
+            lambda: self.dormant(self.status()),
+            "the temporary failed unit is unexpectedly running; cleanup refused",
+        )
+        if path.exists() or path.is_symlink():
+            self.own_file()
+            path.unlink()
+            self.command("daemon-reload")
+        status = self.status()
+        require(
+            self.absent_binding(status),
+            "the temporary failed unit has a new binding; cleanup refused",
+        )
+        if status.get("ActiveState") == "failed":
+            self.command("reset-failed", self.manager.unit_name)
+        wait_until(
+            lambda: not self.present(),
+            "the temporary failed-unit registration was not cleared",
+        )
+
+
+def published_legacy_bundle(root, report):
+    """Fetch the real historical release, never a relabeled current wheel."""
+    directory = root / "published-legacy"
+    directory.mkdir()
+    release = releases.latest_release(directory, LEGACY_VERSION)
+    require(
+        release.checksums[release.archive_name] == LEGACY_ARCHIVE_SHA256,
+        "the published legacy archive differs from the pinned regression fixture",
+    )
+    bundle = releases.download_release(release, directory)
+    report["legacy_release"] = {
+        "version": LEGACY_VERSION,
+        "archive_sha256": sha256(directory / release.archive_name),
+        "source": release.url(release.archive_name),
+    }
+    return bundle
+
+
+def verify_installed_updater_sources(python, bundle, version, run):
+    with zipfile.ZipFile(bundle / f"kohaku_kt_mcp-{version}-py3-none-any.whl") as wheel:
+        expected = {
+            name: hashlib.sha256(wheel.read("kt_mcp/" + name)).hexdigest()
+            for name in ("update.py", "managed_service.py")
+        }
+    program = (
+        "import hashlib,json,kt_mcp; from pathlib import Path; "
+        "root=Path(kt_mcp.__file__).parent; "
+        "print(json.dumps({name:hashlib.sha256((root/name).read_bytes()).hexdigest() "
+        "for name in ('update.py','managed_service.py')}))"
+    )
+    require(
+        json.loads(run([python, "-I", "-c", program])) == expected,
+        "the installed updater differs from the verified release sources",
+    )
+
+
 def verify(arguments, report, sensitive):
     root = Path(tempfile.mkdtemp(prefix="kt-mcp-update-verify-")).resolve()
     manager = None
+    stale = None
     attempted = False
     try:
         bundle, version = unpack_verified(arguments.archive, root / "unpacked")
-        report.update(initial_version=version, archive_sha256=sha256(arguments.archive))
+        report.update(
+            initial_version=LEGACY_VERSION,
+            target_version=version,
+            archive_sha256=sha256(arguments.archive),
+        )
+        require(
+            releases.version_key(version) > releases.version_key(LEGACY_VERSION),
+            "the upgrade gate requires a release newer than the pinned legacy version",
+        )
+        legacy_bundle = published_legacy_bundle(root, report)
         require(
             tuple(map(int, version.split("."))) < (9, 8, 7),
             "choose newer verification fixture versions for this release",
@@ -427,8 +635,12 @@ def verify(arguments, report, sensitive):
         bin_dir = root / "command links"
         workspace = root / "workspace 中文"
         workspace.mkdir()
+        marker = workspace / "legacy-workspace.txt"
+        marker.write_text("retained through bootstrap update\n", encoding="utf-8")
         config = root / 'private config 中文 % $ "quotes".json'
-        transport, failure_marker = make_fixtures(bundle, version, root, prefix)
+        transport, failure_marker = make_fixtures(
+            bundle, version, root, prefix, arguments.archive
+        )
         environment = clean_environment()
         environment["PATH"] = str(transport) + os.pathsep + environment.get("PATH", "")
         token = ""
@@ -438,11 +650,11 @@ def verify(arguments, report, sensitive):
                 arguments, cwd=root, environment=environment, token=token, **kwargs
             )
 
-        report["stage"] = "fresh current installation"
+        report["stage"] = "published legacy installation"
         run(
             [
                 "bash",
-                bundle / "install.sh",
+                legacy_bundle / "install.sh",
                 "--prefix",
                 prefix,
                 "--bin-dir",
@@ -452,6 +664,11 @@ def verify(arguments, report, sensitive):
             ]
         )
         cli, python = bin_dir / "kt-mcp", prefix / "venv/bin/python"
+        require(
+            run([cli, "--version"]).strip() == "Kohaku KT MCP " + LEGACY_VERSION,
+            "the upgrade gate did not install the published legacy version",
+        )
+        verify_installed_updater_sources(python, legacy_bundle, LEGACY_VERSION, run)
         run([python, "-I", "-m", "pip", "install", "--no-index", sentinel_wheel(root)])
         retained_sentinel = sentinel_state(python, run)
         port = available_port()
@@ -485,9 +702,74 @@ def verify(arguments, report, sensitive):
         attempted = True
         run([cli, "service", "install", "--name", name, "--config", config])
         run([cli, "service", "start", "--name", name])
-        before = ready(manager, python, config, url, version)
+        before = ready(manager, python, config, url, LEGACY_VERSION, workspace)
         require(before["UnitFileState"] == "disabled", "initial service was enabled")
         original = snapshot(manager, config)
+
+        report["stage"] = "legacy failed-registration reproduction"
+        stale = StaleRegistration(run)
+        stale.create()
+        report["temporary_stale_unit"] = stale.manager.unit_name
+        legacy_failure = run(
+            [cli, "update", "--version", version, "--name", name], fails=True
+        )
+        require(
+            "Could not read a regular managed service file" in legacy_failure
+            and "Previous installation retained" in legacy_failure,
+            "the published legacy updater did not reproduce the reported failure",
+        )
+        unchanged = ready(manager, python, config, url, LEGACY_VERSION, workspace)
+        require(
+            unchanged["MainPID"] == before["MainPID"]
+            and snapshot(manager, config) == original
+            and not (prefix / ".kt-mcp-update").exists(),
+            "the rejected legacy update changed the installation or running service",
+        )
+        stale.unchanged()
+        report["legacy_failure_reproduced"] = True
+
+        report["stage"] = (
+            "verified bootstrap upgrades the published legacy installation"
+        )
+        run(
+            [
+                "bash",
+                ROOT / "install.sh",
+                "--update",
+                "--version",
+                version,
+                "--prefix",
+                prefix,
+                "--python",
+                sys.executable,
+                "--name",
+                name,
+            ]
+        )
+        current = ready(manager, python, config, url, version, workspace)
+        require(
+            current["MainPID"] != before["MainPID"]
+            and snapshot(manager, config) == original
+            and marker.read_text(encoding="utf-8")
+            == "retained through bootstrap update\n",
+            "the bootstrap update did not preserve the selected instance and workspace",
+        )
+        require(
+            sentinel_state(python, run) == retained_sentinel,
+            "the bootstrap update lost another installed package",
+        )
+        verify_installed_updater_sources(python, bundle, version, run)
+        stale.unchanged()
+        report["legacy_bootstrap_update"] = {
+            "from": LEGACY_VERSION,
+            "to": version,
+            "old_sources_verified": True,
+            "new_sources_verified": True,
+            "selected_service_restarted": True,
+            "configuration_and_workspace_preserved": True,
+            "unrelated_failed_registration_unchanged": True,
+        }
+        before = current
 
         report["stage"] = "active update"
         run([cli, "update", "--name", name])
@@ -570,19 +852,25 @@ def verify(arguments, report, sensitive):
             "extra sentinel package and running service restored"
         )
         report["credential_log_check"] = "passed"
+        stale.unchanged()
+        report["failed_registration_retained_through_all_updates"] = True
         report["stage"] = "complete"
         report["success"] = True
     finally:
         report["cleanup"] = "pending"
         try:
-            if attempted and manager is not None:
-                if manager.unit_path.exists():
-                    manager.uninstall()
-                require(
-                    not manager.unit_path.exists()
-                    and manager.status()["MainPID"] in {"", "0"},
-                    "the verification service did not fully stop and uninstall",
-                )
+            try:
+                if stale is not None:
+                    stale.cleanup()
+            finally:
+                if attempted and manager is not None:
+                    if manager.unit_path.exists():
+                        manager.uninstall()
+                    require(
+                        not manager.unit_path.exists()
+                        and manager.status()["MainPID"] in {"", "0"},
+                        "the verification service did not fully stop and uninstall",
+                    )
             shutil.rmtree(root)
             report["cleanup"] = "passed"
         except Exception:

@@ -847,14 +847,20 @@ def worker_main(directory: Path, argv) -> int:
                     color="yellow",
                 )
             else:
-                _say(
-                    (
-                        "Update completed; leftover files cleaned."
-                        if state["phase"] == "committed"
-                        else "Previous installation retained; original service state restored."
-                    ),
-                    color="yellow",
-                )
+                if state["phase"] == "committed":
+                    result = "Update completed; leftover files cleaned."
+                elif (
+                    state["phase"] == "preparing"
+                    and not state["stop_requested"]
+                    and not state["backup_ready"]
+                ):
+                    result = (
+                        "Update stopped before installation; "
+                        "installed files and services are unchanged."
+                    )
+                else:
+                    result = "Previous installation retained; original service state restored."
+                _say(result, color="yellow")
         return 1
     finally:
         if descriptor is not None:

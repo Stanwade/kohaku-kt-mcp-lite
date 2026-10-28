@@ -383,13 +383,19 @@ def test_update_preserves_configuration_unit_extra_packages_and_service_intent(
     )
 
 
-@pytest.mark.parametrize("failure", ["download", "preflight"])
+@pytest.mark.parametrize("failure", ["discovery", "download", "preflight"])
 def test_preparation_failure_never_stops_or_changes_the_running_installation(
-    update_fixture, monkeypatch, failure
+    update_fixture, monkeypatch, capsys, failure
 ):
     fixture = update_fixture
     original_prepare = PREPARE
     monkeypatch.setattr(module, "_prepare", original_prepare)
+    if failure == "discovery":
+
+        def discovery(*args):
+            raise module.services.ManagedServiceError("Fixture service file is missing")
+
+        monkeypatch.setattr(module.services, "find_services", discovery)
 
     def download(*args):
         if failure == "download":
@@ -403,15 +409,17 @@ def test_preparation_failure_never_stops_or_changes_the_running_installation(
     monkeypatch.setattr(module.releases, "download_release", download)
     monkeypatch.setattr(module, "_command", lambda *args, **kwargs: "")
     monkeypatch.setattr(module, "_verify", verify)
-    with pytest.raises((module.UpdateError, module.releases.ReleaseError)):
-        module._apply(
-            fixture.installation, fixture.release, fixture.directory, fixture.state()
-        )
+    module._write_state(fixture.directory, fixture.state())
+    assert fixture.run_worker() == 1
     assert tree(fixture.venv) == fixture.original
     fixture.assert_external_unchanged()
     assert fixture.status["MainPID"] == "1234"
     assert not any(event[0] in {"stop", "start"} for event in fixture.events)
-    assert not (fixture.directory / "backup").exists()
+    assert not fixture.directory.exists()
+    output = capsys.readouterr().out
+    assert "Update stopped before installation" in output
+    assert "installed files and services are unchanged" in output
+    assert "original service state restored" not in output
 
 
 PREPARE = module._prepare
