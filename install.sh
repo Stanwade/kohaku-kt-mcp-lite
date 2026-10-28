@@ -8,7 +8,7 @@ kt_mcp_online_install() (
         cat <<'HELP'
 Usage: install.sh [OPTIONS]
        curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
-       curl -fsSL URL | bash -s -- --version 0.3.0 --prefix "/path/to/installation"
+       curl -fsSL URL | bash -s -- --version 0.3.1 --prefix "/path/to/installation"
 
   --version VERSION  Stable release X.Y.Z or vX.Y.Z (default: latest release)
   --prefix DIR       Forward the installation directory to the bundled installer

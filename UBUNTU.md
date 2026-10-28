@@ -51,7 +51,7 @@ kt-mcp
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-  bash -s -- --version 0.3.0 \
+  bash -s -- --version 0.3.1 \
     --prefix "$HOME/apps/kt-mcp" \
     --bin-dir "$HOME/.local/bin" \
     --python /usr/bin/python3
@@ -76,7 +76,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 (
   set -o pipefail
   curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-    bash -s -- --version 0.3.0
+    bash -s -- --version 0.3.1
 )
 ```
 
@@ -84,7 +84,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 
 ### 手动下载发行包
 
-从同一个 Release 下载 `kt-mcp-0.3.0-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+从同一个 Release 下载 `kt-mcp-0.3.1-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
@@ -93,8 +93,8 @@ sha256sum --ignore-missing -c SHA256SUMS
 确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
 
 ```bash
-tar -xzf kt-mcp-0.3.0-linux.tar.gz
-cd kt-mcp-0.3.0-linux
+tar -xzf kt-mcp-0.3.1-linux.tar.gz
+cd kt-mcp-0.3.1-linux
 bash ./install.sh
 ```
 
@@ -113,25 +113,25 @@ bash scripts/install_linux.sh
 本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
 
 ```bash
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.0-py3-none-any.whl
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.1-py3-none-any.whl
 ```
 
 `--source` 只用于本地安装器，在线入口不接受它。
 
 ### 升级已有安装
 
-v0.2.4 起，在服务之外的普通用户终端运行：
+v0.3.1 起，可直接使用 TUI 的 Actions → Software updates。命令行入口（v0.2.4 起）仍可在服务之外的普通用户终端运行：
 
 ```bash
 kt-mcp update
 kt-mcp update --check                  # 只检查，不安装、不暂停服务
-kt-mcp update --version 0.3.0           # 指定正式版；不支持降级
+kt-mcp update --version 0.3.1           # 指定正式版；不支持降级
 kt-mcp update --name kt-mcp-dev         # 选择要恢复运行的用户实例
 ```
 
 更新器根据**当前执行的 CLI 所属虚拟环境**识别安装，不依赖当前工作目录或后来改变的 XDG 默认目录。它沿用原 Python 和命令链接，不修改配置、访问令牌、unit、自启动或 linger。下载和校验、依赖准备及副本试装均在停服之前完成；随后备份完整旧环境、离线安装并验证。原来运行的用户服务会恢复启动，并通过本机 MCP 初始化核对版本；原来停止的服务保持停止。Quick Tunnel 重启后通常会产生新的公网地址，重新打开 TUI 或运行 `kt-mcp link` 获取。
 
-安装、启动失败或正常中断时会恢复原虚拟环境，包括旧依赖和额外安装的包。恢复失败会保留备份及独立恢复入口，并打印准确的恢复命令；先解决提示中的问题，再执行它。若机器断电或进程被强制杀死，可在原安装前缀的 `.kt-mcp-update` 中找到 `worker.py`，用原 base Python 执行 `python3 -I /原安装前缀/.kt-mcp-update/worker.py --recover`（自定义 Python 要换成原解释器）。不要手动删除未完成事务的备份。
+安装、启动失败或正常中断时会恢复原虚拟环境，包括旧依赖和额外安装的包。恢复失败会保留备份及独立恢复入口；在仍运行的 TUI 中选择 Recover interrupted update，或执行 `kt-mcp update --recover`。若机器断电或进程被强制杀死，可在原安装前缀的 `.kt-mcp-update` 中找到 `worker.py`，用原 base Python 执行 `python3 -I /原安装前缀/.kt-mcp-update/worker.py --recover`（自定义 Python 要换成原解释器）。不要手动删除未完成事务的备份。
 
 **从 v0.2.3 或更早版本首次升级**：旧 CLI 没有 `update`，新在线入口可以直接调用新版更新器，完成相同的服务暂停与恢复：
 
@@ -239,43 +239,46 @@ WSL 的 Ubuntu 必须启用 systemd，且 Windows/WSL 虚拟机本身处于运�
 kt-mcp tui
 ```
 
-无参数的 `kt-mcp tui` 打开所有用户实例的统一列表；空列表按 `n` 新建。列表显示实例名、运行状态、端口、接入方式和工作区，上下键选择，Enter 打开该实例详细面板；`s` 启动、`x` 停止、`r` 重启、`o` 配置、`u` 查看链接、`l` 查看日志，操作只作用于当前选中实例。详细面板按 `q` 返回列表，列表按 `q` 退出，后台服务继续运行。
+无参数的 `kt-mcp tui` 打开所有用户实例的统一列表。总览与详情都提供 **`n` 新建、`a` 全部操作、`b` 返回实例列表**；显式配置入口也可在界面内切换到列表或新建。列表显示名称、状态、端口、接入方式和工作区，上下键选择，Enter 打开详情。空列表同样可使用新建、操作菜单和帮助。详细面板按 `q` 返回上层，列表按 `q` 退出，后台服务继续运行。
 
-在项目目录直接运行 `kt-mcp` 则优先打开该目录的实例。新实例向导显示**启动当前命令时所在的目录**，按 Enter 使用它，也可输入其他已有目录。支持绝对路径、相对路径和 `~/项目`；路径中有空格时直接输入，不需要 shell 引号。
+`a` **Actions** 提供可滚动的完整菜单：新建、打开/创建显式配置、软件更新、实例列表导出、启停/重启、配置、安装/重建、卸载保留配置、自启动、linger、实时日志、链接和 HTTP/stdio 客户端导出、前台会话、服务详情。CLI 与 TUI 共用管理后端，完整映射见 [功能矩阵](docs/TUI_PARITY.md)。
+
+在项目目录直接运行 `kt-mcp` 会选中统一列表中对应目录的实例。新实例向导显示**启动当前命令时所在的目录**，按 Enter 使用它，也可输入其他已有目录。支持绝对路径、相对路径和 `~/项目`；路径中有空格时直接输入，不需要 shell 引号。
 
 每个命名实例保存到 `~/.config/kt-mcp/instances/kt-mcp-名称.json`（遵循 `XDG_CONFIG_HOME`），配套自己的 `kt-mcp-名称.service`、端口、访问令牌和启动状态。自动命名包含目录名和真实路径摘要，同名但路径不同的项目仍能区分。重复进入同一真实目录会找到原实例。已有 `~/.config/kt-mcp/config.json` 自动纳入列表，无需迁移；默认显示为 `kt-mcp`，以前已用自定义服务名注册时沿用实际服务名。
 
-按名称直接选择可运行 `kt-mcp tui --instance backend`。保留旧的单实例入口 `kt-mcp tui --config /absolute/path/config.json --name kt-mcp-backend`；显式配置路径不会被当前目录覆盖。
+按名称直接选择可运行 `kt-mcp tui --instance backend`。保留显式入口 `kt-mcp tui --config /absolute/path/config.json --name kt-mcp-backend`；显式路径不会被当前目录覆盖。也可在 Actions → Open / create configuration 选择配置路径、服务名和 user/system 作用域。
 
 **修改已有配置按 `o` Configure**。首先明确显示要暂停的实例，默认选择 No；确认后等待该服务停止，再进入预填现有值的向导，其他实例继续运行。可以改工作区、端口、quick/named/local 接入方式；named 模式还可改公网域名和隐藏输入的 Tunnel Token，Enter 保留原值。MCP 访问令牌不重新生成，保存文件保持原属主和 `0600` 权限。
 
-保存会同步更新 systemd 的工作目录并重新加载 unit，不改变自启动和 linger。**编辑期间保持停止，保存或取消后也保持停止；回到面板按 `s` 才启动**，并检查本机 MCP 连接。确认暂停之前取消则不改变服务状态。保存或 unit 更新失败时尝试恢复原配置和 unit；存在外部修改时拒绝覆盖并显示恢复状态。未注册服务时只编辑配置，之后按 `i` 注册/启动；检测到手工启动的 daemon 仍在运行时，先在原终端停止它再编辑。
+保存会同步更新 systemd 的工作目录并重新加载 unit，不改变自启动和 linger。**编辑期间保持停止，保存或取消后也保持停止；回到面板按 `s` 才启动**，并检查本机 MCP 连接。确认暂停之前取消则不改变服务状态。保存或 unit 更新失败时尝试恢复原配置和 unit；存在外部修改时拒绝覆盖并显示恢复状态。未注册服务时只编辑配置，之后按 `s` 注册并启动，或在 Actions 选择具体安装参数。前台会话需要先在其会话视图按 `q` 停止再编辑；程序不会仅凭一个保存的 PID 结束无法验证归属的外部进程。
 
-向导逐项检查工作区、端口和接入模式，输入有误会说明原因并让你重试。输入 `:back` 返回上一步并保留已填内容，`:q`、Ctrl+C 或 Ctrl+D 取消。最后会显示工作区的绝对路径、端口、接入模式及配置位置，按 Enter 保存；输入 `edit` 可从工作区开始修改。确认保存前不会写配置，首次初始化不会覆盖已有配置。固定域名的 Tunnel Token 使用隐藏输入，摘要不显示令牌。
+向导逐项检查工作区、端口和接入模式，输入有误会说明原因并让你重试。输入 `:back` 返回上一步并保留已填内容，`:q`、Ctrl+C 或 Ctrl+D 取消。全部输入在原生 curses 表单内完成，凭据使用隐藏输入，Esc 取消、Ctrl+U 清空当前字段。新建先询问实例名，留空按最终工作区自动命名。最后显示绝对路径、端口、接入方式及配置位置，Enter 保存；`edit` 从工作区开始修改，`advanced` 配置 cloudflared 路径和文件访问范围。保存冲突会显示原因并保留已填内容。保存后可选择 Start now，默认为 No。确认保存前不会写配置，首次初始化不会覆盖已有配置。固定域名的 Tunnel Token 使用隐藏输入，摘要不显示令牌。
 
 向导和面板使用颜色与粗体突出提示、默认值、地址和状态。无色终端自动降级；使用 `NO_COLOR=1 kt-mcp` 可关闭颜色，保留终端支持的粗体。面板使用 Python 标准库 curses，不需要 Tk 或桌面环境；通过 SSH 使用时需要分配终端，例如 `ssh -t user@host`。
 
 | 按键 | 操作 |
 | --- | --- |
-| `i` | 注册用户服务、启用 linger，并启用/启动服务 |
+| `n` / `a` / `b` | 新建实例 / 全部操作 / 返回实例列表；总览和详情通用 |
+| `i` | 安装/重建表单，分别选择启动、自启动、linger、替换及系统运行账户 |
 | `o` | 确认暂停 MCP，编辑工作区、端口及接入方式；保存/取消后保持停止 |
-| `s` / `x` / `r` | 启动 / 停止 / 重启 |
+| `s` / `x` / `r` | 启动 / 停止 / 重启；普通启动不隐式开启自启动或 linger |
 | `e` / `d` | 启用 / 取消自启动；不改变当前运行状态 |
 | `g` | 启用用户 linger |
-| `u` | 查看纯链接，以及带当前 `--config` 路径的单行导出命令 |
-| `l` | 按需加载可滚动日志，遮盖已知令牌 |
-| `c` | 显式显示含访问令牌的客户端 JSON；需要完整原始 JSON 时用 `kt-mcp client-config`，避免屏幕折行影响复制 |
+| `u` | 查看完整链接，视图内 `w` 保存完整、无折行的私有文件 |
+| `l` | 脱敏日志；`f` 跟随/暂停，`n` 选 1–1000 行，`w` 导出 |
+| `c` | 查看 HTTP 客户端 JSON，`w` 直接导出；stdio JSON 在 Actions 中选择 |
 | `v` | 查看完整工作区、配置和 unit 路径，不显示令牌 |
-| `?` | 查看按键帮助、当前实例的 CLI 命令和 linger 权限问题的处理方式 |
+| `?` | 查看当前页面导航和管理帮助 |
 | `q` | 退出面板，不改变后台服务状态 |
 
 紧凑主页显示进程状态、PID、重启次数、工作区、Boot/Linger，以及**含 MCP 访问令牌的完整 MCP link**，并按当前状态提示操作。配置路径和其他细节放在 `v`，日志只在按 `l` 时加载。日志继续脱敏，Cloudflare Tunnel Token 不在主页或链接视图中显示。
 
 local/named 的 `Configured` 地址可在未启动时查看，不表示服务可用。quick 必须等当前服务的有效启动记录，等待、停止、失败或记录失效时不继续显示旧链接。systemd 的 active 只表示进程已启动；`Startup verified` / `Tunnel started` 还要求启动记录与该 unit 的 MainPID 匹配。这是启动时的 MCP 检查和首次隧道连接记录，不是持续健康探测，也不保证公网 DNS、路由或访问可用。普通用户服务应启用自启动，并确认 `Linger: yes`。
 
-最小终端尺寸为 64×18。长链接完整换行，超出页面时用上下键或 PgUp/PgDn 滚动，不省略字符；复制时若终端带入折行，按 `u` 查看准确的单行导出命令。工作区长路径在中间省略，完整路径见 `v`。弹窗支持中文和方向键、PgUp/PgDn 滚动，Enter/Esc/q 返回主面板。
+最小终端尺寸为 64×18。长链接完整换行，超出页面时用上下键或 PgUp/PgDn 滚动，不省略字符；需要完整链接或 JSON 时，直接在视图中按 `w` 导出，不依赖终端选择复制。工作区长路径在中间省略，完整路径见 `v`。弹窗支持中文和方向键、PgUp/PgDn 滚动，Enter/Esc/q 返回主面板。
 
-以上详细面板按键保持可用，统一列表还提供 `n` 新建及方向键选择。管理已安装的系统级服务时使用 `tui --system --config /absolute/path/config.json`，需要相应权限；系统级首次注册仍通过显式指定 `--run-as` 的 CLI 完成。
+系统服务可在 Open / create configuration 中选择 system；普通用户会看到默认拒绝的管理员授权确认，确认后由操作系统的 sudo 提示完成认证，再进入系统面板。创建系统配置时显式选择普通运行账户，配置由该账户写入；安装表单收集 run-as、启动和自启动等选项。权限边界与 CLI 相同，拒绝授权或在认证时 Ctrl+C 会回到界面。Linger 权限不足时也提供明确的授权重试。
 
 ## 多实例命令行
 
@@ -289,11 +292,11 @@ kt-mcp instance restart backend
 kt-mcp instance link backend
 ```
 
-`create` 的工作区默认当前目录，省略 `--port` 会推荐未被其他实例预留、且当前可绑定的端口；省略 `--start` 只保存配置。`--start` 只注册并立即启动；开机自启动和退出登录后的持久运行可在 TUI 详细面板用 `e`、`g` 开启。统一列表首次按 `s` 则沿用 TUI 的注册、启用和 linger 流程。名称可以写 `backend` 或完整的 `kt-mcp-backend`。各实例令牌独立生成，普通列表不输出令牌，`link` 显式输出完整客户端链接。
+`create` 的工作区默认当前目录，省略 `--port` 会推荐未被其他实例预留、且当前可绑定的端口；省略 `--start` 只保存配置。`--start` 只注册并立即启动；开机自启动和退出登录后的持久运行可在 TUI 详细面板用 `e`、`g` 开启。统一列表和详情首次按 `s` 与 CLI 相同，仅注册并启动。名称可以写 `backend` 或完整的 `kt-mcp-backend`。各实例令牌独立生成，普通列表不输出令牌，`link` 显式输出完整客户端链接。
 
 创建、编辑或启动前会检查已有实例的端口及 named 域名冲突；停止的实例仍保留自己的端口配置。建议各 named 实例配置独立 Tunnel，并将公网路由指向各自本机端口。Quick Tunnel 的随机域名由 Cloudflare 分配，重启可能变化，不能在本机任意指定。
 
-多实例共用一套软件安装。目前 `kt-mcp update` 仍按选定服务执行更新：在统一面板停止其他共享安装的实例后，用 `kt-mcp update --name kt-mcp-backend` 更新，完成后再按需要启动其他实例。它会拒绝在其他共享实例仍运行时替换安装环境。
+多实例共用一套软件安装。先在管理器停止其他共享安装的活跃实例，再打开 Actions → Software updates，选择关联服务、检查或安装；也可选择指定版本、确认取消或 Recover interrupted update。进度和结果都在界面中显示，取消会等待恢复结束，安装/恢复成功会重新加载新版 TUI。完成后在同一管理器启动需要运行的其他实例。它复用 `kt-mcp update [--name NAME] [--version VERSION]` 与 `update --recover`，仍拒绝在其他共享实例运行时替换安装环境。
 
 ## 无界面运行与客户端配置
 
@@ -327,7 +330,7 @@ kt-mcp client-config
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python scripts/build_linux.py
-.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.0-linux.tar.gz --systemd
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.1-linux.tar.gz --systemd
 ```
 
 构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。

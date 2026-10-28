@@ -417,7 +417,7 @@ def verify_tui(cli, config, name, *, cwd, environment, url):
             if select.select([master], [], [], 0.1)[0]:
                 captured.extend(os.read(master, 65536))
                 del captured[:-200_000]
-                if b"Quit panel" in captured:
+                if b"[b] Instances [q] Quit" in captured:
                     break
         else:
             raise TimeoutError("installed TUI did not render")
@@ -438,6 +438,142 @@ def verify_tui(cli, config, name, *, cwd, environment, url):
         )
         os.write(master, b"q")
         require(process.wait(timeout=10) == 0, "installed TUI did not exit cleanly")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        os.close(master)
+        if slave is not None:
+            os.close(slave)
+
+
+def verify_native_creation(cli, *, cwd, environment):
+    """Create through the installed launcher, with no editable package or test stub."""
+    import fcntl
+    import pty
+    import termios
+
+    name = "kt-mcp-wheel-" + uuid.uuid4().hex[:10]
+    workspace = cwd / "native workspace 中文"
+    workspace.mkdir()
+    config_home = cwd / "native-tui-configuration"
+    target = config_home / "kt-mcp/instances" / (name + ".json")
+    port = available_port()
+    terminal_environment = {
+        **environment,
+        "TERM": "xterm-256color",
+        "LC_ALL": "C.UTF-8",
+        "XDG_CONFIG_HOME": str(config_home),
+    }
+    terminal_environment.pop("NO_COLOR", None)
+    master, slave = pty.openpty()
+    process = None
+    captured = bytearray()
+    position = 0
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 64, 0, 0))
+        process = subprocess.Popen(
+            [str(cli), "tui"],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            cwd=cwd,
+            env=terminal_environment,
+            start_new_session=True,
+        )
+        os.close(slave)
+        slave = None
+
+        def native():
+            flags = termios.tcgetattr(master)[3]
+            require(
+                not flags & termios.ICANON and not flags & termios.ECHO,
+                "installed new-instance form left native terminal input",
+            )
+            require(
+                re.search(rb"\x1b\[\?(?:1049|1047|47)l", captured) is None,
+                "installed new-instance form exited curses",
+            )
+
+        def expect(label):
+            nonlocal position
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                plain = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", captured)
+                # These ordered stages each introduce a new prompt. Matching is
+                # restricted to bytes after the preceding matched prompt.
+                found = plain.find(label.encode("utf-8"), position)
+                if found >= 0:
+                    position = found + len(label.encode("utf-8"))
+                    native()
+                    return
+                require(process.poll() is None, "installed creation TUI exited early")
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        raise RuntimeError(
+                            "installed creation TUI closed its terminal"
+                        ) from None
+                    require(
+                        bool(chunk), "installed creation TUI stopped producing output"
+                    )
+                    captured.extend(chunk)
+                    require(
+                        len(captured) < 2_000_000,
+                        "installed creation TUI output exceeded its limit",
+                    )
+            raise TimeoutError("installed creation TUI did not reach " + label)
+
+        def answer(label, value=""):
+            expect(label)
+            os.write(master, (value + "\n").encode("utf-8"))
+
+        expect("Instances")
+        os.write(master, b"n")
+        answer("Instance name [", name)
+        answer("Workspace [", str(workspace))
+        answer("Port [", str(port))
+        answer("Mode [", "local")
+        answer("Save?")
+        expect("Start instance now?")
+        # No is the default; no service should be installed by this operation.
+        expect("No, return")
+        os.write(master, b"\n")
+        expect("Selected: " + name)
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        require(
+            saved["workspace"] == str(workspace)
+            and saved["port"] == port
+            and saved["mode"] == "local",
+            "installed native creation saved different settings",
+        )
+        require(
+            bool(re.fullmatch(r"[A-Za-z0-9_-]{32,128}", saved["token"]))
+            and target.stat().st_mode & 0o777 == 0o600,
+            "installed native creation did not save a private independent token",
+        )
+        require(
+            not (config_home / "systemd/user" / (name + ".service")).exists(),
+            "installed native creation registered a service after declining Start",
+        )
+        native()
+        os.write(master, b"q")
+        require(
+            process.wait(timeout=10) == 0, "installed creation TUI did not exit cleanly"
+        )
+        return {
+            "created_through_installed_launcher": True,
+            "native_curses": True,
+            "terminal": "64x18",
+            "workspace_port_mode_verified": True,
+            "private_token": True,
+            "declined_start_without_unit": True,
+        }
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
@@ -601,6 +737,10 @@ def verify(arguments, report, sensitive):
                         environment=environment,
                         url=url,
                     )
+                    report["stage"] = "installed native new-instance form"
+                    report["tui_native_creation"] = verify_native_creation(
+                        cli, cwd=root, environment=environment
+                    )
                     after = service_status()
                     require(
                         after["ActiveState"] == "active"
@@ -685,6 +825,7 @@ def main(argv=None):
         "tool_count": 0,
         "installed_venv_worker": False,
         "tui": "not requested",
+        "tui_native_creation": "not requested",
         "cleanup": "not started",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }

@@ -21,6 +21,14 @@ from .terminal_style import TerminalStyle
 
 MARKER = "kohaku-kt-mcp installer v1"
 TRANSACTION = ".kt-mcp-update"
+WORKER_MODULES = ("update.py", "releases.py", "managed_service.py", "terminal_style.py")
+WORKER_SOURCE = (
+    "import sys\nfrom pathlib import Path\n"
+    "root = Path(__file__).resolve().parent\n"
+    "sys.path.insert(0, str(root))\n"
+    "from runtime.update import worker_main\n"
+    "raise SystemExit(worker_main(root, sys.argv[1:]))\n"
+)
 PHASES = {
     "preparing",
     "backing-up",
@@ -280,15 +288,110 @@ def _validate_state(state):
         )
 
 
+def recovery_argv(installation: Installation) -> list[str]:
+    """Arguments for the independent worker; callers must validate before launching."""
+    return [
+        str(installation.base_python),
+        "-I",
+        str(installation.prefix / TRANSACTION / "worker.py"),
+        "--recover",
+    ]
+
+
 def recovery_command(installation: Installation):
-    return shlex.join(
-        [
-            str(installation.base_python),
-            "-I",
-            str(installation.prefix / TRANSACTION / "worker.py"),
-            "--recover",
-        ]
+    return shlex.join(recovery_argv(installation))
+
+
+def _recovery_bytes(path: Path, *, private=False, limit=1048576) -> bytes:
+    expected = _owned(path, private=private)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        actual = os.fstat(stream.fileno())
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise UpdateError("Recovery files changed while being inspected; retry.")
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise UpdateError("A recovery file exceeds the supported size.")
+    return data
+
+
+def _managed_environment_marker(path: Path) -> bool:
+    try:
+        _owned(path, directory=True)
+        _owned(path / "pyvenv.cfg")
+        return (
+            _recovery_bytes(path / ".kt-mcp-managed", limit=4096)
+            .decode("utf-8")
+            .strip()
+            == MARKER
+        )
+    except (OSError, UnicodeError, UpdateError):
+        return False
+
+
+def recoverable_installation(prefix: Path | None = None) -> Installation:
+    """Validate a retained private worker without requiring working package metadata.
+
+    An already-running TUI may pass its captured installation prefix if the
+    installed CLI was damaged. The worker still takes its exclusive lock and
+    validates the current journal before it changes any files or services.
+    """
+    if sys.platform != "linux" or os.geteuid() == 0:
+        raise UpdateError("Recovery requires the ordinary installing Linux account.")
+    if prefix is None:
+        venv = Path(sys.prefix).absolute()
+        if (
+            venv.name != "venv"
+            or sys.prefix == sys.base_prefix
+            or venv.is_symlink()
+            or not Path(__file__).resolve().is_relative_to(venv.resolve())
+        ):
+            raise UpdateError("Recovery requires the original managed installation.")
+        prefix = venv.parent
+    prefix = Path(prefix).expanduser().absolute()
+    _owned(prefix, directory=True)
+    prefix = prefix.resolve()
+    directory = prefix / TRANSACTION
+    if not directory.exists() and not directory.is_symlink():
+        raise UpdateError("No unfinished update was found for this installation.")
+    _owned(directory, directory=True, private=True)
+    state = json.loads(_recovery_bytes(directory / "state.json", private=True))
+    _validate_state(state)
+    data = state["installation"]
+    installation = Installation(
+        Path(data["prefix"]),
+        Path(data["python"]),
+        Path(data["base_python"]),
+        data["version"],
     )
+    if installation.prefix != prefix:
+        raise UpdateError("The recovery journal belongs to a different installation.")
+    if (
+        not installation.base_python.is_file()
+        or not os.access(installation.base_python, os.X_OK)
+        or installation.base_python.is_relative_to(installation.venv)
+        or installation.base_python.resolve().is_relative_to(installation.venv)
+    ):
+        raise UpdateError("The original recovery Python is unavailable.")
+    runtime = directory / "runtime"
+    _owned(runtime, directory=True, private=True)
+    for filename in ("__init__.py", *WORKER_MODULES):
+        _owned(runtime / filename)
+    if _recovery_bytes(directory / "worker.py", limit=65536) != WORKER_SOURCE.encode(
+        "utf-8"
+    ):
+        raise UpdateError(
+            "The saved recovery entry is invalid; retained files are unchanged."
+        )
+    original_available = _managed_environment_marker(installation.venv)
+    backup_available = state["backup_ready"] and _managed_environment_marker(
+        directory / "backup"
+    )
+    if not (original_available or backup_available):
+        raise UpdateError(
+            "No managed environment or complete backup is available for recovery."
+        )
+    return installation
 
 
 def _handoff(installation: Installation, release: releases.Release, name: str | None):
@@ -307,21 +410,9 @@ def _handoff(installation: Installation, release: releases.Release, name: str | 
         runtime = directory / "runtime"
         runtime.mkdir(mode=0o700)
         (runtime / "__init__.py").write_text("", encoding="utf-8")
-        for filename in (
-            "update.py",
-            "releases.py",
-            "managed_service.py",
-            "terminal_style.py",
-        ):
+        for filename in WORKER_MODULES:
             shutil.copyfile(Path(__file__).with_name(filename), runtime / filename)
-        (directory / "worker.py").write_text(
-            "import sys\nfrom pathlib import Path\n"
-            "root = Path(__file__).resolve().parent\n"
-            "sys.path.insert(0, str(root))\n"
-            "from runtime.update import worker_main\n"
-            "raise SystemExit(worker_main(root, sys.argv[1:]))\n",
-            encoding="utf-8",
-        )
+        (directory / "worker.py").write_text(WORKER_SOURCE, encoding="utf-8")
         state = {
             "schema": 1,
             "installation": {
@@ -790,8 +881,20 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--name", help="User service name, if this installation has multiple instances"
     )
+    parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="Recover an interrupted update using its retained independent worker",
+    )
     arguments = parser.parse_args(argv)
+    if arguments.recover and (arguments.check or arguments.version or arguments.name):
+        parser.error("--recover cannot be combined with --check, --version, or --name")
     try:
+        if arguments.recover:
+            installation = recoverable_installation()
+            command = recovery_argv(installation)
+            os.execve(command[0], command, releases.clean_environment())
+            return 0
         from kt_mcp import __version__
 
         requested = (

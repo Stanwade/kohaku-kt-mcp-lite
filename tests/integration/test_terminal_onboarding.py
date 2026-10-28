@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+from test_tui_parity import VisibleScreen
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux" or os.geteuid() == 0,
@@ -33,6 +34,8 @@ class TerminalSession:
         self.master, slave = pty.openpty()
         self.output = bytearray()
         self.position = 0
+        self.native = not arguments or arguments[0] == "tui"
+        self.screen = VisibleScreen(rows, columns)
         self.process = None
         try:
             fcntl.ioctl(
@@ -53,32 +56,50 @@ class TerminalSession:
         finally:
             os.close(slave)
 
+    def pump(self, timeout=0.1):
+        if not select.select([self.master], [], [], timeout)[0]:
+            return False
+        try:
+            chunk = os.read(self.master, 65536)
+        except OSError as exc:
+            if exc.errno != errno.EIO:
+                raise
+            return False
+        self.output.extend(chunk)
+        self.screen.feed(chunk)
+        return bool(chunk)
+
     def expect(self, prompt):
-        expected = prompt.encode("utf-8")
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            # Keep raw bytes for attribute/credential checks. Matching visible
-            # text must also work when a label and its value use different styles.
-            plain = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output)
-            found = plain.find(expected, self.position)
-            if found >= 0:
-                self.position = found + len(expected)
-                return
-            if select.select([self.master], [], [], 0.1)[0]:
-                try:
-                    chunk = os.read(self.master, 65536)
-                except OSError as exc:
-                    if exc.errno != errno.EIO:
-                        raise
-                    break
-                if not chunk:
-                    break
-                self.output.extend(chunk)
-            elif self.process.poll() is not None:
+            self.pump()
+            if self.native:
+                # ncurses redraws changed cells only. Validate the current screen,
+                # including wrapped labels, instead of searching old frame bytes.
+                expected = "".join(prompt.split())
+                if expected in "".join(self.screen.text.split()):
+                    return
+            else:
+                expected = prompt.encode("utf-8")
+                plain = re.sub(
+                    rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output
+                )
+                found = plain.find(expected, self.position)
+                if found >= 0:
+                    self.position = found + len(expected)
+                    return
+            if self.process.poll() is not None:
                 break
-        # Do not include the transcript: it may contain a credential if the
-        # hidden-input regression being tested has occurred.
+        # Never include a transcript: a hidden-input regression may expose secrets.
         pytest.fail(f"Terminal did not reach expected prompt: {prompt}", pytrace=False)
+
+    def assert_native(self):
+        import termios
+
+        flags = termios.tcgetattr(self.master)[3]
+        assert not flags & termios.ICANON
+        assert not flags & termios.ECHO
+        assert not re.search(rb"\x1b\[\?(?:1049|1047|47)l", self.output)
 
     def send(self, value):
         os.write(self.master, value.encode("utf-8"))
@@ -88,26 +109,17 @@ class TerminalSession:
             pytest.fail("A credential was echoed to the terminal", pytrace=False)
 
     def assert_link_rendered(self, url, *, since=0):
-        """Check one view's captured rendering, allowing a URL to wrap.
-
-        This is intentionally not a current-frame or stale-state assertion.
-        State transitions are covered by controller tests.
-        """
-        plain = re.sub(
-            rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output[since:]
-        )
-        if url.encode("utf-8") not in re.sub(rb"\s+", b"", plain):
-            pytest.fail("The view did not render the complete MCP link", pytrace=False)
-
-    def assert_command_rendered(self, command, *, since):
-        plain = re.sub(
-            rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output[since:]
-        )
-        if command.encode("utf-8") not in plain:
-            pytest.fail(
-                "The link view did not show the correctly quoted export command",
-                pytrace=False,
+        """Require the complete link in the current native frame."""
+        if self.native:
+            visible = re.sub(r"\s+", "", self.screen.text)
+            rendered = url in visible
+        else:
+            plain = re.sub(
+                rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\([0-~])", b"", self.output[since:]
             )
+            rendered = url.encode("utf-8") in re.sub(rb"\s+", b"", plain)
+        if not rendered:
+            pytest.fail("The view did not render the complete MCP link", pytrace=False)
 
     def resize(self, rows, columns):
         import fcntl
@@ -118,6 +130,7 @@ class TerminalSession:
         fcntl.ioctl(
             self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0)
         )
+        self.screen = VisibleScreen(rows, columns)
         self.process.send_signal(signal.SIGWINCH)
 
     def attributes_at(self, text):
@@ -315,21 +328,22 @@ def test_first_run_uses_current_directory_and_recovers_from_invalid_port(onboard
     terminal.expect("Port [")
     terminal.send("not-a-port\n")
     terminal.expect("Port must be an integer from 1 to 65535.")
-    assert terminal.attributes_at("Port must be an integer")[1] is not None
+    terminal.assert_native()
+    # Native errors remain visible while the current question stays emphasized.
+    assert terminal.attributes_at("Port [")[0]
     terminal.expect("Port [")
     terminal.send("9123\n")
     terminal.expect("Mode [")
     terminal.send("\n")
     terminal.expect("Review")
     terminal.expect("Save? [")
-    assert terminal.attributes_at("Review")[0]
     assert terminal.attributes_at("Save?")[0]
     assert not config.exists()
     assert not config.parent.exists()
     before_save = bytes(terminal.output)
 
     terminal.send("\n")
-    terminal.expect("Quit panel")
+    terminal.expect("[q] Quit")
     settings = json.loads(config.read_text(encoding="utf-8"))
     assert settings["workspace"] == str(workspace.resolve())
     assert settings["port"] == 9123
@@ -356,8 +370,8 @@ def test_cancelling_at_summary_creates_no_configuration_or_directories(
     terminal.expect("Save? [")
     assert not config.exists()
     assert not config.parent.exists()
+    terminal.assert_native()
     terminal.send(":q\n")
-    terminal.expect("Setup cancelled; no configuration was saved.")
     terminal.finish()
 
     assert set(tmp_path.rglob("*")) == before
@@ -377,8 +391,8 @@ def test_named_tunnel_secret_is_hidden_in_a_real_terminal(onboarding, tmp_path):
     terminal.expect("Save? [")
     terminal.assert_hidden(tunnel_token)
     assert not config.exists()
+    terminal.assert_native()
     terminal.send(":q\n")
-    terminal.expect("Setup cancelled; no configuration was saved.")
     terminal.finish()
 
     assert set(tmp_path.rglob("*")) == before
@@ -422,19 +436,27 @@ def test_interactive_init_preserves_port_option_and_defaults_to_current_director
         terminal.close()
 
 
-def test_bare_terminal_command_enters_setup_and_cancels_without_writes(tmp_path):
+def test_bare_terminal_command_enters_native_setup_and_cancel_returns_to_overview(
+    tmp_path,
+):
     workspace = tmp_path / "bare command project"
     workspace.mkdir()
     environment = terminal_environment(tmp_path)
     xdg_config = Path(environment["XDG_CONFIG_HOME"])
-    config = xdg_config / "kt-mcp/config.json"
     before = set(tmp_path.rglob("*"))
     terminal = TerminalSession([], cwd=workspace, environment=environment)
     try:
+        terminal.expect("Instance name [")
+        terminal.assert_native()
+        terminal.send("\n")
         terminal.expect(f"Workspace [{workspace}]: ")
-        assert not config.exists()
+        terminal.assert_native()
+        assert not xdg_config.exists()
         terminal.send(":q\n")
-        terminal.expect("Setup cancelled; no configuration was saved.")
+        terminal.expect("Kohaku KT MCP · Instances")
+        terminal.expect("No instances yet.")
+        terminal.assert_native()
+        terminal.send("q")
         terminal.finish()
 
         assert not xdg_config.exists()
@@ -477,7 +499,7 @@ def test_narrow_panel_keeps_help_and_details_credential_free(tmp_path):
         columns=64,
     )
     try:
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         for label in ("MCP link", "[u]", "[o]", "[?]"):
             if label.encode("utf-8") not in terminal.output:
                 pytest.fail(f"Narrow panel is missing {label}", pytrace=False)
@@ -489,19 +511,19 @@ def test_narrow_panel_keeps_help_and_details_credential_free(tmp_path):
         # Curses can reuse part of an old label; newly drawn path text is stable.
         terminal.expect("项目目录")
         terminal.expect("配置目录")
-        terminal.send("\x1b[6~")
-        # Curses may reuse the beginning of a label from the previous page.
-        terminal.expect("HTTP port: 8765")
+        terminal.send("\x1b[6~" * 10)
+        terminal.expect("Local HTTP port: 8765")
         for secret in (token, token[:12], token[-12:]):
             terminal.assert_hidden(secret, since=details_start)
         terminal.send("\n")
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
 
         help_start = len(terminal.output)
         terminal.send("?")
         terminal.expect("Panel help")
-        terminal.send("\x1b[6~")
-        terminal.expect("q quits this panel")
+        terminal.expect("q returns to the overview")
+        terminal.send("\x1b[6~" * 10)
+        terminal.expect("Startup evidence does not")
         for secret in (token, token[:12], token[-12:]):
             terminal.assert_hidden(secret, since=help_start)
         terminal.send("\n")
@@ -552,7 +574,7 @@ def test_narrow_link_view_keeps_long_url_and_exports_the_selected_config(tmp_pat
         columns=64,
     )
     try:
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.assert_link_rendered(url)
         assert terminal.attributes_at("MCP link")[0]
         bold, color = terminal.attributes_at("https://mcp.example.com/mcp/")
@@ -560,37 +582,29 @@ def test_narrow_link_view_keeps_long_url_and_exports_the_selected_config(tmp_pat
 
         link_start = len(terminal.output)
         terminal.send("u")
-        terminal.expect("Copy as one line:")
-        terminal.expect("Up/Down/PgUp/PgDn")
+        terminal.expect("[w] Save file")
+        terminal.assert_native()
         terminal.assert_link_rendered(url, since=link_start)
         terminal.assert_hidden(tunnel_token)
 
-        # A wide second view lets us compare quoting and embedded spaces exactly,
-        # without treating a stripped history of cursor movements as a screen.
+        # Export the full selected link inside the manager, including when its
+        # configuration and destination paths contain spaces and Chinese text.
+        export = tmp_path / "chosen link export 中文.txt"
+        terminal.send("w")
+        terminal.expect("Export file")
+        terminal.assert_native()
+        terminal.send(str(export) + "\n")
+        terminal.expect("Export saved")
+        terminal.assert_native()
         terminal.send("\n")
-        terminal.expect("Quit panel")
-        terminal.resize(30, 500)
-        command_start = len(terminal.output)
-        terminal.send("u")
-        terminal.expect("Copy as one line:")
-        terminal.expect("Up/Down/PgUp/PgDn")
-        command = shlex.join(
-            [
-                str(Path(sys.executable).absolute()),
-                "-m",
-                "kt_mcp",
-                "link",
-                "--config",
-                str(config),
-            ]
-        )
-        terminal.assert_command_rendered(command, since=command_start)
-        terminal.send("\n")
+        terminal.expect("[w] Save file")
+        terminal.send("q")
+        terminal.expect("[q] Quit")
         terminal.send("q")
         terminal.finish()
 
         result = subprocess.run(
-            shlex.split(command),
+            [sys.executable, "-m", "kt_mcp", "link", "--config", str(config)],
             cwd=workspace,
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -599,10 +613,12 @@ def test_narrow_link_view_keeps_long_url_and_exports_the_selected_config(tmp_pat
             check=False,
         )
         if result.returncode != 0 or result.stdout != (url + "\n").encode("utf-8"):
+            pytest.fail("CLI export did not return the selected link", pytrace=False)
+        if not export.exists() or export.read_bytes() != result.stdout:
             pytest.fail(
-                "The displayed export command did not return the selected link",
-                pytrace=False,
+                "Native export differs from the complete CLI link", pytrace=False
             )
+        assert export.stat().st_mode & 0o777 == 0o600
         if result.stderr:
             pytest.fail("Link export produced unexpected diagnostics", pytrace=False)
         terminal.assert_hidden(tunnel_token)
@@ -635,7 +651,7 @@ def test_no_color_panel_keeps_its_link_bold_without_foreground_color(tmp_path):
         environment=environment,
     )
     try:
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.assert_link_rendered(url)
         assert terminal.attributes_at("MCP link")[0]
         assert terminal.attributes_at(url) == (True, None)
@@ -776,12 +792,12 @@ def configuration_actions(fixture):
     ]
 
 
-def test_configure_suspends_curses_and_keeps_mcp_stopped_after_saving(tmp_path):
+def test_configure_stays_in_curses_and_keeps_mcp_stopped_after_saving(tmp_path):
     fixture = configuration_fixture(tmp_path)
     owner = fixture.config.stat().st_uid, fixture.config.stat().st_gid
     terminal = configuration_terminal(fixture)
     try:
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.send("o")
         terminal.expect("MCP will stop and stay offline while you edit.")
         terminal.expect("Stop MCP and configure? [y/N]")
@@ -800,12 +816,13 @@ def test_configure_suspends_curses_and_keeps_mcp_stopped_after_saving(tmp_path):
         terminal.expect("Save?")
         terminal.send("\n")
         terminal.expect("MCP is stopped. [s] Start when ready.")
-        terminal.expect("Press Enter to return to the panel:")
-        assert terminal.attributes_at("Kohaku KT MCP · Configure")[0]
+        terminal.expect("Enter/Esc/q: back")
+        terminal.assert_native()
+        assert terminal.attributes_at("Configure " + fixture.name)[0]
         terminal.assert_hidden(fixture.token, since=wizard_start)
         terminal.assert_hidden(fixture.tunnel_token, since=wizard_start)
         terminal.send("\n")
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.assert_link_rendered(
             "http://127.0.0.1:9123/mcp/" + fixture.token, since=wizard_start
         )
@@ -838,7 +855,7 @@ def test_configure_hidden_token_keeps_its_default_and_never_restarts(tmp_path, c
     inode = fixture.config.stat().st_ino
     terminal = configuration_terminal(fixture)
     try:
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.send("o")
         terminal.expect("Stop MCP and configure?")
         wizard_start = len(terminal.output)
@@ -852,11 +869,12 @@ def test_configure_hidden_token_keeps_its_default_and_never_restarts(tmp_path, c
         terminal.expect("Save?")
         terminal.send(":q\n" if cancel else "\n")
         terminal.expect("MCP remains stopped." if cancel else "MCP is stopped.")
-        terminal.expect("Press Enter to return to the panel:")
+        terminal.expect("Enter/Esc/q: back")
+        terminal.assert_native()
         terminal.assert_hidden(fixture.token, since=wizard_start)
         terminal.assert_hidden(fixture.tunnel_token, since=wizard_start)
         terminal.send("\n")
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.send("q")
         terminal.finish()
 
@@ -880,7 +898,7 @@ def test_configure_without_a_registered_unit_only_edits_settings(tmp_path):
     fixture = configuration_fixture(tmp_path, registered=False)
     terminal = configuration_terminal(fixture)
     try:
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.send("o")
         terminal.expect("No service is registered.")
         terminal.expect("Edit settings? [y/N]")
@@ -894,9 +912,10 @@ def test_configure_without_a_registered_unit_only_edits_settings(tmp_path):
         terminal.expect("Save?")
         terminal.send("\n")
         terminal.expect("Saved. [i] Install/start when ready.")
-        terminal.expect("Press Enter to return to the panel:")
+        terminal.expect("Enter/Esc/q: back")
+        terminal.assert_native()
         terminal.send("\n")
-        terminal.expect("Quit panel")
+        terminal.expect("[q] Quit")
         terminal.send("q")
         terminal.finish()
 

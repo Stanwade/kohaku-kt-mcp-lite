@@ -34,6 +34,13 @@ def isolated_tokens(monkeypatch, tmp_path):
     # Catalog/socket guards have dedicated coverage in test_instance_tui.py.
     monkeypatch.setattr(module, "ensure_available", lambda *args, **kwargs: None)
     monkeypatch.setattr(module, "catalog_lock", nullcontext)
+
+    def control(manager, path, action):
+        manager.control(action)
+        return manager.status()
+
+    monkeypatch.setattr(module, "control_service", control)
+    monkeypatch.setattr(module, "service_setting", control)
     monkeypatch.setattr(curses, "has_colors", lambda: False)
 
 
@@ -118,7 +125,7 @@ def test_quit_and_unknown_keys_never_stop_or_modify_service(terminal):
 
 def test_system_panel_does_not_guess_installation_user(terminal):
     terminal.manager.system = True
-    with pytest.raises(ValueError, match="--run-as"):
+    with pytest.raises(ValueError, match="Actions > Install"):
         terminal.controller.act("i")
     assert terminal.manager.calls == []
 
@@ -161,22 +168,29 @@ def test_non_tty_fails_before_curses_or_setup(tmp_path, monkeypatch, capsys):
     assert not path.exists()
 
 
-def test_system_mode_does_not_create_missing_config_as_root(
-    tmp_path, monkeypatch, capsys
+def test_missing_system_config_uses_native_account_setup_and_can_cancel(
+    tmp_path, monkeypatch
 ):
+    import curses
+
+    from kt_mcp import tui_actions
+
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     path = tmp_path / "missing/config.json"
+    calls = []
 
-    def no_wizard(path):
-        pytest.fail("system mode must require prior run-user configuration")
+    def prepare(screen, selected_path):
+        calls.append(selected_path)
+        return False
 
-    monkeypatch.setattr(module, "setup_config", no_wizard)
-    with pytest.raises(SystemExit) as error:
-        module.main(["--system", "--config", str(path)])
-    assert error.value.code == 2
-    assert "run user" in capsys.readouterr().err
+    monkeypatch.setattr(tui_actions, "prepare_system_config", prepare)
+    monkeypatch.setattr(
+        curses, "wrapper", lambda function, *args: function(object(), *args)
+    )
+    assert module.main(["--system", "--config", str(path)]) == 0
+    assert calls == [path]
     assert not path.exists()
 
 
@@ -205,6 +219,8 @@ def test_cancelled_first_run_never_opens_panel_or_leaves_partial_config(
 ):
     import curses
 
+    from kt_mcp import instance_tui, tui_forms
+
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
@@ -217,13 +233,18 @@ def test_cancelled_first_run_never_opens_panel_or_leaves_partial_config(
         pytest.fail("a cancelled setup must not open the service panel")
 
     monkeypatch.setattr(module, "setup_config", cancelled_setup)
-    monkeypatch.setattr(curses, "wrapper", must_not_open_panel)
+    monkeypatch.setattr(instance_tui, "single_screen", must_not_open_panel)
+    monkeypatch.setattr(
+        tui_forms, "run_wizard", lambda screen, title, callback: callback()
+    )
+    monkeypatch.setattr(
+        curses, "wrapper", lambda function, *args: function(object(), *args)
+    )
     assert module.main(["--config", str(path)]) == 0
     assert not path.exists()
     output = capsys.readouterr()
     assert output.err == ""
-    if isinstance(cancellation, SetupCancelled):
-        assert str(cancellation) in output.out
+    assert output.out == ""
 
 
 def test_small_terminal_ignores_hidden_stop_key(terminal, monkeypatch):
@@ -279,7 +300,7 @@ def active_status(**overrides):
 @pytest.mark.parametrize(
     "status,expected_keys",
     [
-        (active_status(LoadState="not-found", ActiveState="inactive"), ("[i]",)),
+        (active_status(LoadState="not-found", ActiveState="inactive"), ("[s]",)),
         (active_status(ActiveState="inactive", SubState="dead"), ("[s]",)),
         (active_status(ActiveState="failed", SubState="failed"), ("[l]", "[r]")),
         (active_status(ActiveState="activating", SubState="start"), ("[l]",)),
@@ -301,8 +322,8 @@ def test_missing_system_service_guidance_requires_an_explicit_run_user():
         system=True,
     )
 
-    assert "--run-as" in next_action
-    assert "[i]" not in next_action.lower()
+    assert "[i]" in next_action.lower()
+    assert "[a]" in next_action.lower()
 
 
 @pytest.mark.parametrize(
@@ -689,7 +710,6 @@ def test_refresh_does_not_query_logs_and_log_failure_preserves_service_state(
     url = set_mode(terminal, "local")
     record_startup(terminal, url)
     queried = []
-    popups = []
 
     def unavailable(lines):
         queried.append(lines)
@@ -697,21 +717,25 @@ def test_refresh_does_not_query_logs_and_log_failure_preserves_service_state(
 
     monkeypatch.setattr(terminal.manager, "logs", unavailable)
     monkeypatch.setattr(curses, "curs_set", lambda visible: None)
-    monkeypatch.setattr(
-        module, "_popup", lambda screen, title, body: popups.append((title, body))
-    )
     terminal.controller.refresh()
     assert queried == []
 
-    module._screen(RecordingScreen([ord("l"), ord("q")]), terminal.controller)
+    screen = RecordingScreen([ord("l"), ord("q"), ord("q")])
+    module._screen(screen, terminal.controller)
 
     assert queried == [200]
     assert terminal.controller.connection_url == url
     assert terminal.controller.connection_verified
     assert terminal.controller.status["ActiveState"] == "active"
-    assert popups and "journal unavailable" in popups[-1][1]
-    assert MCP_TOKEN not in popups[-1][1]
-    assert TUNNEL_TOKEN not in popups[-1][1]
+    log_frames = [
+        frame
+        for frame in screen.frames
+        if any("Service logs" in text for _, _, text in frame)
+    ]
+    logs = "\n".join(text for frame in log_frames for _, _, text in frame)
+    assert "journal unavailable" in logs
+    assert MCP_TOKEN not in logs
+    assert TUNNEL_TOKEN not in logs
 
 
 def test_link_popup_is_read_only_and_exports_the_exact_quoted_configuration(
@@ -747,7 +771,11 @@ def test_read_only_popups_restore_the_previous_note(terminal, monkeypatch, key):
     note = "Earlier operation completed."
     terminal.controller.note = note
     monkeypatch.setattr(curses, "curs_set", lambda visible: None)
+    from kt_mcp import tui_actions
+
     monkeypatch.setattr(module, "_popup", lambda *args: None)
+    monkeypatch.setattr(tui_actions, "show_logs", lambda *args: None)
+    monkeypatch.setattr(tui_actions, "show_export", lambda *args, **kwargs: None)
 
     module._screen(RecordingScreen([ord(key), ord("q")]), terminal.controller)
 
@@ -885,7 +913,21 @@ def editable_service(terminal, monkeypatch, tmp_path):
     monkeypatch.setattr(module, "stop_service", stop)
     monkeypatch.setattr(module, "render_unit", render)
     monkeypatch.setattr(module, "restore_unit", restore)
-    monkeypatch.setattr(module, "start_service", start)
+
+    def control(manager, path, action):
+        current = inspect(
+            manager.name,
+            manager.system,
+            expected_python=sys.executable,
+            expected_config=path,
+        )
+        if action in {"stop", "restart"}:
+            stop(current)
+        if action in {"start", "restart"}:
+            return start(current)
+        return manager.status()
+
+    monkeypatch.setattr(module, "control_service", control)
     monkeypatch.setattr(terminal.manager, "install", install)
     terminal.events = events
     terminal.original_unit = unit.read_bytes()
@@ -1240,7 +1282,7 @@ def test_confirmed_missing_unit_allows_configuration_without_registering_a_servi
         pytest.fail("configuration-only editing must not control a service")
 
     monkeypatch.setattr(module, "stop_service", unexpected)
-    monkeypatch.setattr(module, "start_service", unexpected)
+    monkeypatch.setattr(module, "control_service", unexpected)
     monkeypatch.setattr(module, "render_unit", unexpected)
 
     terminal.controller.configure(ask=answers(["y", "", "", "local", ""]))
@@ -1251,33 +1293,48 @@ def test_confirmed_missing_unit_allows_configuration_without_registering_a_servi
 
 
 @pytest.mark.parametrize("failure", [False, True])
-def test_configuration_restores_curses_after_normal_input_and_errors(
+def test_configuration_uses_native_wizard_and_never_leaves_curses(
     terminal, monkeypatch, failure
 ):
     import builtins
     import curses
 
-    operations = []
-    monkeypatch.setattr(curses, "def_prog_mode", lambda: operations.append("save"))
-    monkeypatch.setattr(curses, "endwin", lambda: operations.append("leave"))
-    monkeypatch.setattr(curses, "reset_prog_mode", lambda: operations.append("resume"))
-    monkeypatch.setattr(curses, "curs_set", lambda value: None)
-    monkeypatch.setattr(builtins, "input", lambda prompt: "")
+    from kt_mcp import tui_forms
 
-    def configure():
-        assert operations == ["save", "leave"]
-        operations.append("configure")
+    operations = []
+    shown = []
+
+    def forbidden(*args):
+        pytest.fail("native configuration must not leave curses or call input()")
+
+    monkeypatch.setattr(curses, "endwin", forbidden)
+    monkeypatch.setattr(builtins, "input", forbidden)
+    ask = lambda prompt: ""
+    ask_secret = lambda prompt: ""
+
+    def wizard(screen, title, callback):
+        operations.append(("wizard", title))
+        return callback(ask=ask, ask_secret=ask_secret)
+
+    def configure(**readers):
+        assert readers == {"ask": ask, "ask_secret": ask_secret}
+        operations.append(("configure",))
         if failure:
             raise module.ServiceError("fixture configure failure " + TUNNEL_TOKEN)
         terminal.controller.note = "Changes cancelled. MCP remains stopped."
 
+    monkeypatch.setattr(tui_forms, "run_wizard", wizard)
+    monkeypatch.setattr(
+        tui_forms, "message", lambda screen, title, text: shown.append(text)
+    )
     monkeypatch.setattr(terminal.controller, "configure", configure)
-    screen = RecordingScreen([])
+    module._configure(RecordingScreen([]), terminal.controller)
 
-    module._configure(screen, terminal.controller)
-
-    assert operations == ["save", "leave", "configure", "resume"]
-    assert screen.clear_requested
+    assert operations == [
+        ("wizard", "Configure " + terminal.manager.name),
+        ("configure",),
+    ]
+    assert shown == [terminal.controller.note]
     assert TUNNEL_TOKEN not in terminal.controller.note
 
 

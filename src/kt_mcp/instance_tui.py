@@ -4,7 +4,6 @@ import time
 
 from kt_mcp import instances, tui
 from kt_mcp.onboarding import SetupCancelled
-from kt_mcp.terminal_style import TerminalStyle
 
 
 class InstanceManagerController:
@@ -106,15 +105,14 @@ class InstanceManagerController:
             return None
         panel = self.selected_controller()
         panel.refresh()
-        if key == "s" and panel.status.get("LoadState") == "not-found":
-            # Starting a saved instance registers only its own unit.
-            key = "i"
         popup = panel.act(key)
         self.note = f"{panel.manager.name}: {panel.note}" if panel.note else ""
         return popup
 
-    def create(self, *, ask=None, ask_secret=None):
-        item = instances.setup_instance(ask=ask, ask_secret=ask_secret)
+    def create(self, *, workspace=None, name=None, ask=None, ask_secret=None):
+        item = instances.setup_instance(
+            workspace=workspace, name=name, ask=ask, ask_secret=ask_secret
+        )
         self.refresh()
         self.select(item.name)
         self.note = f"{item.name} saved. Press s to install/start this instance."
@@ -138,46 +136,123 @@ def _row(values, widths):
     return "  ".join(_padded(value, width) for value, width in zip(values, widths))
 
 
-def _new_instance(screen, controller):
-    """Run the normal setup wizard without affecting a running instance."""
-    import curses
+def _new_instance(screen, controller, workspace=None):
+    """Create and optionally start an instance without leaving curses."""
+    from kt_mcp.tui_forms import confirm, message, run_wizard
 
-    item = None
-    curses.def_prog_mode()
-    curses.endwin()
+    def collect(*, ask, ask_secret):
+        while True:
+            name = ask("Instance name [Enter=automatic, :q=cancel]: ").strip()
+            if name.lower() == ":q":
+                raise SetupCancelled("New instance cancelled.")
+            try:
+                if name:
+                    canonical = instances.canonical_name(name)
+                    if any(
+                        item.name == canonical for item in instances.list_instances()
+                    ):
+                        raise instances.InstanceError(
+                            "That instance name already exists; choose another or leave it empty."
+                        )
+                break
+            except instances.InstanceError as exc:
+                print(str(exc))
+        return controller.create(
+            workspace=workspace,
+            name=name or None,
+            ask=ask,
+            ask_secret=ask_secret,
+        )
+
     try:
+        item = run_wizard(screen, "New instance", collect)
+    except (SetupCancelled, KeyboardInterrupt, EOFError):
+        controller.note = "New instance cancelled."
+        return None
+    except tui.UI_ERRORS as exc:
+        controller.note = controller.redact(f"Instance creation failed: {exc}")
+        message(screen, "New instance", controller.note)
+        return None
+    if item is None:
+        controller.note = "New instance cancelled."
+        return None
+    if confirm(
+        screen,
+        "Start instance now?",
+        f"{item.name} has been saved.\n"
+        "Start this instance now? Automatic startup and user linger remain unchanged.",
+        default=False,
+    ):
         try:
-            item = controller.create()
-        except (SetupCancelled, KeyboardInterrupt, EOFError):
-            controller.note = "New instance cancelled."
+            controller.act("s")
         except tui.UI_ERRORS as exc:
-            controller.note = controller.redact(f"Instance creation failed: {exc}")
-        print("\n" + TerminalStyle().text(controller.note, bold=True, color="yellow"))
-        try:
-            input("Press Enter to return to the manager: ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-    finally:
-        curses.reset_prog_mode()
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        screen.keypad(True)
-        screen.timeout(250)
-        screen.clearok(True)
+            controller.note = controller.redact(
+                f"{item.name} was saved but could not start: {exc}"
+            )
+            message(screen, "Instance saved", controller.note)
     return item
 
 
+def _navigate(screen, controller, destination):
+    """Handle global navigation from a detail panel without nesting panel loops."""
+    while destination is not None:
+        if destination == "instances":
+            return
+        if destination == "new":
+            _new_instance(screen, controller)
+            return
+        if not isinstance(destination, tui.TerminalController):
+            raise TypeError("Unknown interface destination.")
+        panel = destination
+        panel.return_to_list = True
+        destination = tui._screen(screen, panel)
+        controller.note = f"{panel.manager.name}: {panel.note}" if panel.note else ""
+        screen.clearok(True)
+
+
 def _detail(screen, controller):
-    panel = controller.selected_controller()
-    panel.return_to_list = True
-    tui._screen(screen, panel)
-    controller.note = f"{panel.manager.name}: {panel.note}" if panel.note else ""
-    screen.clearok(True)
+    _navigate(screen, controller, controller.selected_controller())
 
 
-def instance_screen(screen, controller, open_selected=False):
+def single_screen(screen, panel):
+    """Let explicitly opened configurations reach the same global manager."""
+    while True:
+        destination = tui._screen(screen, panel)
+        if isinstance(destination, tui.TerminalController):
+            panel = destination
+            continue
+        if destination is not None:
+            controller = InstanceManagerController(
+                selected_name=None if panel.manager.system else panel.manager.name
+            )
+            instance_screen(screen, controller, initial_action=destination)
+        return
+
+
+def manager_help():
+    lines = [
+        "Instance manager",
+        "",
+        "n creates a named or automatically named instance inside this interface.",
+        "a opens all management actions, including updates, recovery and exports.",
+        "b returns to this overview from any instance detail.",
+        "Up/Down selects an instance; Enter opens its details; q closes this screen.",
+        "",
+        "s registers if needed and starts only the selected instance.",
+        "x stops; r restarts; o edits settings after pausing only this instance.",
+        "u opens the link/export viewer; c opens client JSON; l opens redacted logs.",
+        "Start does not enable automatic startup or user linger.",
+        "Use a to choose installation, automatic startup and linger options.",
+        "",
+        "New instances are saved before an optional Start now confirmation.",
+        "Esc cancels a dialog. Unsaved configuration changes are discarded.",
+    ]
+    return "\n".join(lines)
+
+
+def instance_screen(
+    screen, controller, open_selected=False, initial_action=None, initial_workspace=None
+):
     """Show every saved instance; q in a detail panel returns to this list."""
     import curses
 
@@ -189,12 +264,16 @@ def instance_screen(screen, controller, open_selected=False):
     screen.keypad(True)
     screen.timeout(250)
     controller.refresh()
-    if open_selected and controller.selected is not None:
-        try:
+    try:
+        if initial_workspace is not None:
+            _new_instance(screen, controller, workspace=initial_workspace)
+        elif initial_action is not None:
+            _navigate(screen, controller, initial_action)
+        elif open_selected and controller.selected is not None:
             _detail(screen, controller)
-        except tui.UI_ERRORS as exc:
-            controller.note = controller.redact(str(exc))
-            tui._popup(screen, "Instance unavailable", controller.note)
+    except tui.UI_ERRORS as exc:
+        controller.note = controller.redact(str(exc))
+        tui._popup(screen, "Instance unavailable", controller.note)
     next_refresh = 0.0
     offset = 0
     while True:
@@ -217,7 +296,7 @@ def instance_screen(screen, controller, open_selected=False):
                 screen,
                 1,
                 2,
-                f"{len(controller.items)} saved | Actions affect the selected instance",
+                f"{len(controller.items)} saved | Up/Down: select | Enter: details",
                 styles["muted"],
             )
             widths = _columns(width)
@@ -310,7 +389,7 @@ def instance_screen(screen, controller, open_selected=False):
                 screen,
                 height - 3,
                 2,
-                "Up/Down: select | Enter: details | n: new | q: quit",
+                "[n] New [a] Actions [b] Instances [?] Help [q] Quit",
                 styles["muted"],
             )
             tui._put(
@@ -348,12 +427,40 @@ def instance_screen(screen, controller, open_selected=False):
             character = chr(key).lower()
         else:
             continue
-        if character not in {"enter", "n", "s", "x", "r", "o", "u", "l", "c", "v", "?"}:
+        if character not in {
+            "enter",
+            "n",
+            "a",
+            "b",
+            "s",
+            "x",
+            "r",
+            "o",
+            "u",
+            "l",
+            "c",
+            "v",
+            "?",
+        }:
             continue
         try:
+            from kt_mcp import tui_actions
+            from kt_mcp.tui_forms import message
+
             if character == "n":
-                if _new_instance(screen, controller) is not None:
-                    _detail(screen, controller)
+                _new_instance(screen, controller)
+            elif character == "b":
+                pass
+            elif character == "a":
+                try:
+                    panel = controller.selected_controller()
+                except ValueError:
+                    panel = None
+                destination = tui_actions.actions_menu(screen, panel)
+                if destination is not None:
+                    _navigate(screen, controller, destination)
+            elif character == "?":
+                message(screen, "Instance manager help", manager_help())
             elif character == "enter":
                 _detail(screen, controller)
             elif character == "o":
@@ -361,6 +468,14 @@ def instance_screen(screen, controller, open_selected=False):
                 tui._configure(screen, panel)
                 controller.note = (
                     f"{panel.manager.name}: {panel.note}" if panel.note else ""
+                )
+            elif character == "l":
+                tui_actions.show_logs(screen, controller.selected_controller())
+            elif character in {"u", "c"}:
+                tui_actions.show_export(
+                    screen,
+                    controller.selected_controller(),
+                    kind="link" if character == "u" else "client-config",
                 )
             else:
                 if character in {"s", "x", "r"}:
@@ -370,6 +485,8 @@ def instance_screen(screen, controller, open_selected=False):
                 popup = controller.act(character)
                 if popup:
                     tui._popup(screen, *popup)
+        except SetupCancelled:
+            controller.note = "Operation cancelled."
         except tui.UI_ERRORS as exc:
             controller.note = controller.redact(str(exc))
             tui._popup(screen, "Action could not be completed", controller.note)

@@ -76,10 +76,10 @@ jobs:
       - name: System service runs as the requested ordinary account
         run: |
           sudo env KT_MCP_TEST_SYSTEMD=1 KT_MCP_SYSTEM_TEST_USER="$(id -un)" "$(command -v python)" -m pytest tests/integration/test_systemd_lifecycle.py -q -k ordinary_account
-      - name: Independent instances and unified TUI with real systemd
+      - name: Independent instances and native TUI parity with real systemd
         env:
           KT_MCP_TEST_SYSTEMD: "1"
-        run: python -m pytest tests/integration/test_instances_lifecycle.py -q
+        run: python -m pytest tests/integration/test_instances_lifecycle.py tests/integration/test_tui_parity.py -q
       - name: Build packages, online installer, and checksums
         run: python scripts/build_linux.py
       - name: Verify the installed Linux release and all MCP tools

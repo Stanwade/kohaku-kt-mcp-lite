@@ -432,6 +432,7 @@ def main(argv: list[str]) -> int:
         choices=(
             "install",
             "uninstall",
+            "configure",
             "start",
             "stop",
             "restart",
@@ -442,7 +443,11 @@ def main(argv: list[str]) -> int:
             "linger",
         ),
     )
-    parser.add_argument("--config", type=Path, default=default_config_path())
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="configuration path; defaults to the selected registered unit",
+    )
     parser.add_argument("--name", default="kt-mcp")
     parser.add_argument("--system", action="store_true")
     parser.add_argument("--run-as")
@@ -453,8 +458,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--lines", type=int, default=80)
     parser.add_argument("--follow", action="store_true")
     args = parser.parse_args(argv)
+    from kt_mcp import managed_service, operations
+
     try:
         manager = ServiceManager(args.name, args.system)
+        selected_path = args.config or default_config_path()
         if args.action != "install" and (
             args.run_as is not None or args.enable or args.linger or args.replace
         ):
@@ -463,9 +471,24 @@ def main(argv: list[str]) -> int:
             raise ValueError("--now requires install, enable, or disable")
         if args.follow and args.action != "logs":
             raise ValueError("--follow requires logs")
+        if args.action in {
+            "start",
+            "stop",
+            "restart",
+            "enable",
+            "disable",
+            "uninstall",
+        }:
+            binding = managed_service.inspect_service(args.name, args.system)
+            if binding is None:
+                raise ServiceError(
+                    "The selected service is not registered; install it first."
+                )
+            if args.config is None:
+                selected_path = binding.config_path
         if args.action == "install":
             manager.install(
-                args.config,
+                selected_path,
                 run_as=args.run_as,
                 enable=args.enable,
                 now=args.now,
@@ -473,8 +496,18 @@ def main(argv: list[str]) -> int:
                 replace=args.replace,
             )
             print(f"Registered {manager.unit_path}")
+        elif args.action == "configure":
+            from kt_mcp.tui import TerminalController
+
+            if args.config is None:
+                binding = managed_service.inspect_service(args.name, args.system)
+                if binding is not None:
+                    selected_path = binding.config_path
+            controller = TerminalController(manager, selected_path)
+            controller.configure()
+            print(controller.note)
         elif args.action == "uninstall":
-            manager.uninstall()
+            operations.uninstall_service(manager, selected_path)
             print(f"Removed {manager.unit_name}; configuration retained")
         elif args.action == "status":
             print(json.dumps(manager.status(), ensure_ascii=False, indent=2))
@@ -487,8 +520,19 @@ def main(argv: list[str]) -> int:
             manager.enable_linger()
             print("Enabled linger for the current user")
         else:
-            manager.control(args.action, now=args.now)
+            if args.action in {"start", "stop", "restart"}:
+                operations.control_service(manager, selected_path, args.action)
+            else:
+                operations.service_setting(
+                    manager, selected_path, args.action, now=args.now
+                )
             print(f"{args.action}: {manager.unit_name}")
-    except (ValueError, TypeError, OSError, ServiceError) as exc:
+    except (
+        ValueError,
+        TypeError,
+        OSError,
+        ServiceError,
+        managed_service.ManagedServiceError,
+    ) as exc:
         parser.error(str(exc))
     return 0

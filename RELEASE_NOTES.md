@@ -1,3 +1,28 @@
+# v0.3.1 — Complete management inside the TUI
+
+修复统一管理入口与详情页之间的新建断点，并将管理操作接到 CLI/TUI 共用后端。
+
+## 界面内完成管理
+
+- 总览与详情都显示 `n` New、`a` Actions 和 `b` Instances；项目目录启动优先选中统一列表中的对应实例。
+- 原生 curses 新建与配置表单支持自定义名称、workspace、端口、接入方式及隐藏 Token；Review 的 advanced 可配置 cloudflared 和文件访问范围。冲突后保留输入，取消不创建配置。
+- Actions 提供安装/重建参数、启停、自启动、linger、卸载保留配置、显式配置路径、系统作用域及明确的管理员授权。
+- 日志可持续跟随、选择行数并导出；链接、HTTP/stdio 客户端 JSON 可以直接保存为私有文件，无需复制终端命令。
+- 软件更新菜单支持检查、指定版本、选择关联服务、安装、确认取消、恢复和成功后重载新版界面；复用现有事务更新器。
+
+## 一致的行为
+
+- 普通 Start 与 `instance start` 都只注册并启动，不隐式启用自启动或 linger。完整安装选项单独选择；`install --now` 仍遵循 CLI 的 enable+start 语义。
+- 生命周期、自启动及卸载验证所选配置与 unit 绑定；CLI `service --name` 未传配置时沿用 unit 的真实配置路径。
+- CLI 增加 `instance configure`、`service configure`、客户端 JSON/stdio 与私有文件导出，以及 `update --recover`。
+- 配置前确认暂停选中实例，保存或取消后保持停止，其他实例继续运行。共享安装仍须先在管理器停止其他活跃实例再更新。
+
+## 验证
+
+增加真实 64×18 PTY 新建、冲突保留、隐藏输入、取消、导出和双服务管理验收；发行包验收实际通过安装后的 launcher 完成新建。保留跨平台回归、全部 MCP 工具、真实 systemd、升级与失败回滚门禁。更新输出压力测试确认大量长日志不会阻塞主界面。
+
+---
+
 # v0.3.0 — Independent workspaces and one instance manager
 
 每个项目目录可使用独立的 kt-mcp 实例，拥有自己的 workspace、端口、MCP 令牌、接入方式和 systemd 服务。

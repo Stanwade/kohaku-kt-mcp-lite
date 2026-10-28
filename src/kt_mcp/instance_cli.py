@@ -8,8 +8,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from kt_mcp import instances, managed_service
-from kt_mcp.daemon import client_url
+from kt_mcp import instances, managed_service, operations
 from kt_mcp.service import ServiceError, ServiceManager
 
 
@@ -21,31 +20,9 @@ def _selected(name: str) -> instances.Instance:
 
 
 def _control(item: instances.Instance, action: str):
-    manager = ServiceManager(item.name)
-    if action == "start" and manager.status().get("LoadState") == "not-found":
-        manager.install(item.config_path)
-    binding = managed_service.inspect_service(
-        item.name, expected_config=item.config_path
+    return operations.control_service(
+        ServiceManager(item.name), item.config_path, action
     )
-    if binding is None:
-        raise instances.InstanceError(
-            "The instance service is not installed; use start first."
-        )
-    if action in {"start", "restart"}:
-        config = instances.read_config(item.config_path)
-        instances.ensure_available(
-            config,
-            exclude=item.config_path,
-            check_socket=binding.status.get("ActiveState")
-            not in {"active", "activating"},
-        )
-    if action == "stop":
-        managed_service.stop_service(binding)
-    elif action == "start":
-        managed_service.start_service(binding)
-    else:
-        managed_service.stop_service(binding)
-        managed_service.start_service(binding)
 
 
 def _display(value) -> str:
@@ -75,6 +52,7 @@ def main(argv=None) -> int:
     create.add_argument("--mode", choices=("local", "quick", "named"), default="local")
     create.add_argument("--public-origin", default="")
     create.add_argument("--cloudflared", default="")
+    create.add_argument("--allow-outside-workspace", action="store_true")
     create.add_argument(
         "--start", action="store_true", help="Register and start only the new instance"
     )
@@ -83,9 +61,18 @@ def main(argv=None) -> int:
         ("stop", "Stop only the selected instance"),
         ("restart", "Restart only the selected instance"),
         ("link", "Print the selected instance's full MCP URL, including its token"),
+        ("client-config", "Export HTTP or stdio client JSON"),
+        ("configure", "Pause and edit the selected instance with the shared wizard"),
+        ("uninstall", "Uninstall the service; retain its configuration and workspace"),
     ):
         child = commands.add_parser(action, help=explanation)
         child.add_argument("name")
+        if action in {"link", "client-config"}:
+            child.add_argument(
+                "--output", type=Path, help="Create a private export file"
+            )
+        if action == "client-config":
+            child.add_argument("--transport", choices=["http", "stdio"], default="http")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "list":
@@ -130,6 +117,7 @@ def main(argv=None) -> int:
                 mode=arguments.mode,
                 public_origin=arguments.public_origin,
                 cloudflared=arguments.cloudflared,
+                allow_outside_workspace=arguments.allow_outside_workspace,
                 tunnel_token=(
                     os.environ.get("TUNNEL_TOKEN", "")
                     if arguments.mode == "named"
@@ -146,8 +134,28 @@ def main(argv=None) -> int:
                 )
             return 0
         item = _selected(arguments.name)
-        if arguments.command == "link":
-            print(client_url(instances.read_config(item.config_path), item.config_path))
+        if arguments.command in {"link", "client-config"}:
+            kind = arguments.command
+            if kind == "client-config" and arguments.transport == "stdio":
+                kind = "stdio"
+            text = operations.export_text(item.config_path, kind)
+            if arguments.output is not None:
+                print(f"Exported to {operations.write_export(arguments.output, text)}")
+            else:
+                print(text)
+            return 0
+        if arguments.command == "configure":
+            from kt_mcp.tui import TerminalController
+
+            controller = TerminalController(ServiceManager(item.name), item.config_path)
+            controller.configure()
+            print(controller.note)
+            return 0
+        if arguments.command == "uninstall":
+            operations.uninstall_service(ServiceManager(item.name), item.config_path)
+            print(
+                f"{item.name}: service removed; configuration and workspace retained."
+            )
             return 0
         _control(item, arguments.command)
         print(

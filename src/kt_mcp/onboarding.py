@@ -330,6 +330,7 @@ def _collect_config(
     save: Callable[[DaemonConfig], None],
     title: str,
     destination: Callable[[DaemonConfig], Path] | None = None,
+    retry_save: bool = False,
 ) -> DaemonConfig:
     ask = input if ask is None else ask
     ask_secret = getpass.getpass if ask_secret is None else ask_secret
@@ -343,7 +344,11 @@ def _collect_config(
         "mode": settings.mode,
         "origin": settings.public_origin,
         "tunnel_token": tunnel_token,
+        "cloudflared": settings.cloudflared,
+        "allow_outside_workspace": "yes" if settings.allow_outside_workspace else "no",
     }
+    advanced = False
+    save_error = ""
     style = _TerminalStyle()
     print(style.text("Kohaku KT MCP · " + title, bold=True, color="cyan"))
     print("Enter = default   :back = back   :q = cancel")
@@ -354,6 +359,9 @@ def _collect_config(
             fields.append("origin")
             if not environment_tunnel_token:
                 fields.append("tunnel_token")
+        basic_fields = len(fields)
+        if advanced:
+            fields.extend(["cloudflared", "allow_outside_workspace"])
 
         if step == len(fields):
             config = DaemonConfig(
@@ -362,7 +370,8 @@ def _collect_config(
                     port=int(values["port"]),
                     mode=values["mode"],
                     public_origin=values["origin"] if values["mode"] == "named" else "",
-                    cloudflared=settings.cloudflared,
+                    cloudflared=values["cloudflared"],
+                    allow_outside_workspace=values["allow_outside_workspace"] == "yes",
                 ),
                 token,
                 (
@@ -383,13 +392,26 @@ def _collect_config(
                 summary.append(("Origin", config.settings.public_origin))
             if config.settings.cloudflared:
                 summary.append(("Cloudflared", config.settings.cloudflared))
+            summary.append(
+                (
+                    "File access",
+                    (
+                        "outside workspace allowed"
+                        if config.settings.allow_outside_workspace
+                        else "workspace only"
+                    ),
+                )
+            )
             save_path = destination(config) if destination is not None else path
             summary.append(("Save to", str(save_path)))
             for label, value in summary:
                 print(f"  {label:<11} {style.text(value, bold=True)}")
+            if save_error:
+                print(style.text("Not saved: " + save_error, color="yellow"))
+                print("Entries retained. Choose edit, advanced, or :q.")
             answer = _read(
                 ask,
-                style.prompt("Save?", "Enter=save / edit / :back / :q"),
+                style.prompt("Save?", "Enter=save / edit / advanced / :back / :q"),
             ).lower()
             if answer == ":q":
                 raise SetupCancelled("Setup cancelled; no configuration was saved.")
@@ -399,15 +421,25 @@ def _collect_config(
             if answer == "edit":
                 step = 0
                 continue
+            if answer == "advanced":
+                advanced = True
+                step = basic_fields
+                continue
             if answer:
                 print(
                     style.text(
-                        "Use Enter to save, edit to change, :back, or :q.",
+                        "Use Enter to save, edit or advanced to change, :back, or :q.",
                         color="yellow",
                     )
                 )
                 continue
-            save(config)
+            try:
+                save(config)
+            except (OSError, ValueError) as exc:
+                if not retry_save:
+                    raise
+                save_error = str(exc)
+                continue
             print(style.text("Saved", bold=True, color="green") + f" {save_path}")
             return config
 
@@ -435,6 +467,13 @@ def _collect_config(
                 if values[field]
                 else style.prompt("HTTPS origin (e.g. https://mcp.example.com)")
             )
+        elif field == "cloudflared":
+            prompt = style.prompt(
+                "Cloudflared executable (:clear = automatic)",
+                values[field] or "automatic",
+            )
+        elif field == "allow_outside_workspace":
+            prompt = style.prompt("Allow file tools outside workspace?", values[field])
         else:
             prompt = style.prompt(
                 "Tunnel token (hidden; Enter keeps it)"
@@ -461,6 +500,15 @@ def _collect_config(
                 value = _mode(value)
             elif field == "origin":
                 value = _origin(value)
+            elif field == "cloudflared":
+                if value.lower() in {":clear", "automatic"}:
+                    value = ""
+            elif field == "allow_outside_workspace":
+                value = {"y": "yes", "n": "no", "1": "yes", "0": "no"}.get(
+                    value.lower(), value.lower()
+                )
+                if value not in {"yes", "no"}:
+                    raise ValueError("Enter yes or no.")
             elif not value:
                 raise ValueError(
                     "A Cloudflare Tunnel token is required for named mode."
@@ -469,6 +517,7 @@ def _collect_config(
             print(style.text(str(exc), color="yellow"))
             continue
         values[field] = value
+        save_error = ""
         if field == "mode" and value == "named" and environment_tunnel_token:
             print("Tunnel token: using TUNNEL_TOKEN (hidden).")
         step += 1

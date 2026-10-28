@@ -121,6 +121,14 @@ def overview(tmp_path, monkeypatch):
         return managers.setdefault(name, FakeManager(name, tmp_path))
 
     monkeypatch.setattr(tui, "ServiceManager", manager)
+
+    def control(selected, path, action):
+        if action == "start" and selected.status_data["LoadState"] == "not-found":
+            selected.install(path)
+        selected.control(action)
+        return selected.status()
+
+    monkeypatch.setattr(tui, "control_service", control)
     controller = module.InstanceManagerController()
     controller.refresh()
     return SimpleNamespace(
@@ -173,8 +181,9 @@ def test_start_registers_only_selected_unregistered_instance(overview):
         (
             "install",
             overview.paths["kt-mcp-b"],
-            {"now": True, "linger": True},
-        )
+            {},
+        ),
+        ("control", "start"),
     ]
 
 
@@ -202,7 +211,7 @@ def test_detail_quit_returns_to_list_then_outer_quit_exits(overview):
     screen = Screen([10, ord("q"), ord("q")])
     module.instance_screen(screen, overview.controller)
     text = all_text(screen)
-    assert "[q] Instances" in text
+    assert "[q] Back" in text
     assert (
         sum(any("Instances" in line for _, line in frame) for frame in screen.frames)
         >= 2
@@ -279,7 +288,7 @@ def test_new_instance_selection_does_not_start_any_service(overview, monkeypatch
     monkeypatch.setattr(instances, "setup_instance", setup)
     assert overview.controller.create() == created
     assert overview.controller.selected.name == created.name
-    assert calls == [{"ask": None, "ask_secret": None}]
+    assert calls == [{"workspace": None, "name": None, "ask": None, "ask_secret": None}]
     assert all(not manager.calls for manager in overview.managers.values())
 
 
@@ -345,7 +354,7 @@ def test_conflicting_configuration_is_not_saved_or_applied_to_another_instance(
         pass
 
 
-@pytest.mark.parametrize("key", ["i", "s", "r"])
+@pytest.mark.parametrize("key", ["i"])
 @pytest.mark.parametrize("active,check_socket", [("active", False), ("inactive", True)])
 def test_start_guards_check_only_this_config_and_probe_only_stopped_ports(
     overview, monkeypatch, key, active, check_socket
@@ -376,12 +385,7 @@ def test_conflict_blocks_post_configuration_start_before_service_mutation(
     def conflict(*args, **kwargs):
         raise instances.InstanceError("fixture reserved port")
 
-    monkeypatch.setattr(tui, "ensure_available", conflict)
-    monkeypatch.setattr(
-        tui,
-        "start_service",
-        lambda binding: pytest.fail("conflicting instance started"),
-    )
+    monkeypatch.setattr(tui, "control_service", conflict)
     with pytest.raises(instances.InstanceError, match="reserved port"):
         panel.act("s")
     assert manager.calls == []
@@ -432,10 +436,10 @@ def test_workspace_route_selects_existing_instance_without_creation(
     )
     assert tui.main(["--workspace", item.workspace]) == 0
     assert captured[0][1]._requested_name == item.name
-    assert captured[0][2] is True
+    assert captured[0][2] is False
 
 
-def test_workspace_route_creates_missing_instance_then_opens_selected_detail(
+def test_workspace_route_defers_missing_instance_creation_to_native_manager(
     overview, monkeypatch
 ):
     captured = terminal_route(monkeypatch)
@@ -450,9 +454,10 @@ def test_workspace_route_creates_missing_instance_then_opens_selected_detail(
 
     monkeypatch.setattr(instances, "setup_instance", setup)
     assert tui.main(["--workspace", str(target)]) == 0
-    assert calls == [{"workspace": target}]
-    assert captured[0][1]._requested_name == created.name
-    assert captured[0][2] is True
+    assert calls == []
+    assert captured[0][1]._requested_name is None
+    assert captured[0][2] is False
+    assert captured[0][4] == target
 
 
 def test_instance_route_selects_requested_name(overview, monkeypatch):
@@ -466,7 +471,7 @@ def test_explicit_config_keeps_the_single_panel_route(overview, monkeypatch):
     captured = terminal_route(monkeypatch)
     path = overview.paths["kt-mcp-b"]
     assert tui.main(["--config", str(path), "--name", "kt-mcp-b"]) == 0
-    assert captured[0][0] is tui._screen
+    assert captured[0][0] is module.single_screen
     panel = captured[0][1]
     assert panel.config_path == path
     assert panel.manager.name == "kt-mcp-b"
@@ -482,3 +487,278 @@ def test_incompatible_instance_and_explicit_config_fail_before_any_panel(
     assert error.value.code == 2
     assert "cannot be combined" in capsys.readouterr().err
     assert captured == []
+
+
+@pytest.mark.parametrize("key,destination", [("n", "new"), ("b", "instances")])
+def test_detail_has_visible_working_global_navigation(overview, key, destination):
+    panel = overview.controller.selected_controller()
+    panel.return_to_list = True
+    screen = Screen([ord(key)], height=18, width=64)
+    assert tui._screen(screen, panel) == destination
+    text = all_text(screen)
+    assert "[n] New" in text
+    assert "[a] Actions" in text
+    assert "[b] Instances" in text
+    assert all(not manager.calls for manager in overview.managers.values())
+
+
+def test_detail_actions_menu_can_open_global_creation(overview, monkeypatch):
+    from kt_mcp import tui_actions
+
+    calls = []
+    panel = overview.controller.selected_controller()
+
+    def actions(screen, selected):
+        calls.append(selected)
+        return "new"
+
+    monkeypatch.setattr(tui_actions, "actions_menu", actions)
+    assert tui._screen(Screen([ord("a")]), panel) == "new"
+    assert calls == [panel]
+
+
+def test_explicit_configuration_can_enter_unified_manager(overview, monkeypatch):
+    panel = overview.controller.selected_controller()
+    calls = []
+    monkeypatch.setattr(tui, "_screen", lambda screen, selected: "new")
+    monkeypatch.setattr(
+        module,
+        "instance_screen",
+        lambda screen, manager, **options: calls.append((manager, options)),
+    )
+    module.single_screen(Screen([]), panel)
+    assert calls[0][0]._requested_name == panel.manager.name
+    assert calls[0][1] == {"initial_action": "new"}
+
+
+def test_detail_new_routes_to_creation_and_returns_overview(overview, monkeypatch):
+    created = []
+    monkeypatch.setattr(
+        module, "_new_instance", lambda screen, manager: created.append(manager)
+    )
+    screen = Screen([10, ord("n"), ord("q")], height=18, width=64)
+    module.instance_screen(screen, overview.controller)
+    assert created == [overview.controller]
+    assert "Instances" in all_text(screen)
+
+
+def test_empty_manager_help_and_actions_do_not_require_selection(overview, monkeypatch):
+    from kt_mcp import tui_actions, tui_forms
+
+    monkeypatch.setattr(instances, "list_instances", list)
+    messages = []
+    menus = []
+    created = []
+    monkeypatch.setattr(
+        tui_forms,
+        "message",
+        lambda screen, title, body: messages.append((title, body)),
+    )
+    monkeypatch.setattr(
+        tui_actions,
+        "actions_menu",
+        lambda screen, panel: menus.append(panel) or "new",
+    )
+    monkeypatch.setattr(
+        module, "_new_instance", lambda screen, manager: created.append(manager)
+    )
+    manager = module.InstanceManagerController()
+    module.instance_screen(Screen([ord("?"), ord("a"), ord("q")]), manager)
+    assert messages[0][0] == "Instance manager help"
+    assert "n creates" in messages[0][1]
+    assert menus == [None]
+    assert created == [manager]
+
+
+@pytest.mark.parametrize("start_now", [False, True])
+def test_native_new_asks_name_and_explicit_start_without_boot_side_effects(
+    overview, monkeypatch, start_now
+):
+    import builtins
+    import curses
+
+    from kt_mcp import tui_forms
+
+    created = []
+    confirmations = []
+    item = instances.get_instance("a")
+
+    def forbidden(*args):
+        pytest.fail("creation left curses or used input()")
+
+    monkeypatch.setattr(curses, "endwin", forbidden)
+    monkeypatch.setattr(builtins, "input", forbidden)
+
+    def wizard(screen, title, callback):
+        assert title == "New instance"
+        return callback(ask=lambda prompt: "new-project", ask_secret=lambda prompt: "")
+
+    def create(**options):
+        created.append(options)
+        return item
+
+    def confirm(screen, title, body, *, default):
+        confirmations.append((title, body, default))
+        return start_now
+
+    monkeypatch.setattr(tui_forms, "run_wizard", wizard)
+    monkeypatch.setattr(tui_forms, "confirm", confirm)
+    monkeypatch.setattr(overview.controller, "create", create)
+    assert module._new_instance(Screen([]), overview.controller) == item
+    assert created[0]["name"] == "new-project"
+    assert created[0]["workspace"] is None
+    assert confirmations[0][0] == "Start instance now?"
+    assert item.name in confirmations[0][1]
+    assert confirmations[0][2] is False
+    assert overview.managers[item.name].calls == (
+        [("control", "start")] if start_now else []
+    )
+    assert all(
+        call[0] != "linger" and call[:2] != ("control", "enable")
+        for manager in overview.managers.values()
+        for call in manager.calls
+    )
+
+
+def test_native_new_cancel_does_not_create_or_start(overview, monkeypatch):
+    from kt_mcp import tui_forms
+
+    before = {name: path.read_bytes() for name, path in overview.paths.items()}
+
+    def wizard(screen, title, callback):
+        return callback(ask=lambda prompt: ":q", ask_secret=lambda prompt: "")
+
+    monkeypatch.setattr(tui_forms, "run_wizard", wizard)
+    monkeypatch.setattr(
+        overview.controller,
+        "create",
+        lambda **options: pytest.fail("cancelled creation wrote a configuration"),
+    )
+    assert module._new_instance(Screen([]), overview.controller) is None
+    assert all(
+        path.read_bytes() == before[name] for name, path in overview.paths.items()
+    )
+    assert all(not manager.calls for manager in overview.managers.values())
+
+
+def test_selected_shortcuts_use_shared_native_viewers(overview, monkeypatch):
+    from kt_mcp import tui_actions
+
+    calls = []
+    monkeypatch.setattr(
+        tui_actions,
+        "show_logs",
+        lambda screen, panel: calls.append(("logs", panel.manager.name)),
+    )
+    monkeypatch.setattr(
+        tui_actions,
+        "show_export",
+        lambda screen, panel, *, kind: calls.append((kind, panel.manager.name)),
+    )
+    overview.controller.select("kt-mcp-b")
+    module.instance_screen(
+        Screen([ord("l"), ord("u"), ord("c"), ord("q")]), overview.controller
+    )
+    assert calls == [
+        ("logs", "kt-mcp-b"),
+        ("link", "kt-mcp-b"),
+        ("client-config", "kt-mcp-b"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "key,action", [("s", "start"), ("x", "stop"), ("r", "restart")]
+)
+def test_selected_lifecycle_uses_the_same_operation_as_cli(
+    overview, monkeypatch, key, action
+):
+    calls = []
+    panel = overview.controller.selected_controller()
+    monkeypatch.setattr(
+        tui,
+        "control_service",
+        lambda manager, path, verb: calls.append((manager, path, verb))
+        or {"ActiveState": "inactive"},
+    )
+    panel.act(key)
+    assert calls == [(panel.manager, panel.config_path, action)]
+
+
+def test_reload_executes_after_curses_wrapper_unwinds(overview, monkeypatch):
+    import curses
+
+    events = []
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    def wrapper(*args):
+        try:
+            raise tui.ReloadTUI(["--instance", "b"])
+        finally:
+            events.append("terminal-restored")
+
+    def execute(python, arguments):
+        assert events == ["terminal-restored"]
+        events.append((python, arguments))
+
+    monkeypatch.setattr(curses, "wrapper", wrapper)
+    monkeypatch.setattr(tui.os, "execv", execute)
+    assert tui.main([]) == 0
+    assert events[1] == (
+        sys.executable,
+        [sys.executable, "-I", "-m", "kt_mcp", "tui", "--instance", "b"],
+    )
+
+
+def test_install_dialog_cancel_returns_to_detail_without_leaving_manager(
+    overview, monkeypatch
+):
+    from kt_mcp import tui_actions
+
+    panel = overview.controller.selected_controller()
+
+    def cancelled(*args):
+        raise tui.SetupCancelled("cancel")
+
+    monkeypatch.setattr(tui_actions, "install_dialog", cancelled)
+    assert tui._screen(Screen([ord("i"), ord("q")]), panel) is None
+    assert panel.note == "Operation cancelled."
+    assert all(not manager.calls for manager in overview.managers.values())
+
+
+def test_actions_dialog_cancel_returns_to_overview(overview, monkeypatch):
+    from kt_mcp import tui_actions
+
+    def cancelled(*args):
+        raise tui.SetupCancelled("cancel")
+
+    monkeypatch.setattr(tui_actions, "actions_menu", cancelled)
+    module.instance_screen(Screen([ord("a"), ord("q")]), overview.controller)
+    assert overview.controller.note == "Operation cancelled."
+
+
+def test_linger_shortcut_uses_native_permission_flow(overview, monkeypatch):
+    from kt_mcp import tui_actions
+
+    calls = []
+    panel = overview.controller.selected_controller()
+    monkeypatch.setattr(
+        tui_actions, "_enable_linger", lambda screen, selected: calls.append(selected)
+    )
+    tui._screen(Screen([ord("g"), ord("q")]), panel)
+    assert calls == [panel]
+
+
+@pytest.mark.parametrize("key,action", [("e", "enable"), ("d", "disable")])
+def test_boot_shortcuts_require_the_shared_configuration_binding(
+    overview, monkeypatch, key, action
+):
+    calls = []
+    panel = overview.controller.selected_controller()
+    monkeypatch.setattr(
+        tui,
+        "service_setting",
+        lambda manager, path, operation: calls.append((manager, path, operation)),
+    )
+    panel.act(key)
+    assert calls == [(panel.manager, panel.config_path, action)]

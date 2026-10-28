@@ -3,7 +3,7 @@
 KohakuTerrarium MCP 工具层的**简易独立版（Lite）**：提供 12 个工作区工具、桌面 GUI、Linux TUI / systemd 管理和 Cloudflare Tunnel 自动接入。
 
 Linux / Ubuntu 用户可用下方在线命令安装，或在 [本仓库 Releases](https://github.com/Stanwade/kohaku-kt-mcp-lite/releases) 手动下载安装包。首次使用按 [Ubuntu 指南](UBUNTU.md) 进入项目目录并运行 `kt-mcp`。后台服务由 systemd 管理，退出 SSH 或 TUI 后可继续运行。
-Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.3.0 增加按目录选择独立实例和统一 TUI 管理，每个实例可配置自己的端口及接入方式；继续提供 `kt-mcp update`、在线安装、Linux 安装包、通用 Python wheel 和源码包。
+Windows 既有 v0.1.0 单文件 EXE 仍可从 [原发行仓库](https://github.com/DNLINYJ/kohaku-kt-mcp-lite/releases/tag/v0.1.0) 下载；本仓库 v0.3.1 提供按目录选择独立实例、原生 TUI 新建/配置/完整操作菜单和界面内更新；CLI 与 TUI 共享管理操作，每个实例独立配置端口及接入方式；继续提供 `kt-mcp update`、在线安装、Linux 安装包、通用 Python wheel 和源码包。
 源码安装、客户端连接和自行打包的方法见下文。
 
 A standalone MCP tool server extracted from [KohakuTerrarium](https://github.com/Kohaku-Lab/KohakuTerrarium).
@@ -35,8 +35,8 @@ kt-mcp
 
 安装管道只完成软件安装。在不同项目目录运行 `kt-mcp` 时，会按目录的真实路径选择已有实例；首次进入一个新目录时，向导创建独立配置，推荐一个未被占用或预留的端口。Enter 使用默认值，也可修改工作区、端口及 local/quick/named 接入方式，保存前可返回修改或取消。重复进入同一目录会选中同一个实例。
 
-运行 `kt-mcp tui` 可在统一列表中查看全部用户实例，用上下键选择实例，按 Enter 进入详细面板。新实例保存后，按 `s` 在列表中启动，或进入详细面板按 `i` 注册并启动用户服务、开启 linger。详细面板默认显示**含 MCP 访问令牌的完整连接地址**；按 `u` 查看纯链接及当前配置的单行导出命令，`c` 仍可查看客户端 JSON，`l` 按需加载脱敏日志，`q` 退出且不改变服务状态。
-按 `o` **Configure** 可修改选中实例的工作区、端口、接入方式及固定域名设置。面板先提醒并确认暂停该实例，确认后停止它再进入编辑；保存或取消后保持停止，按 `s` 启动，其他实例继续运行。已有 MCP 访问令牌保留，修改工作区会同步更新 systemd 工作目录。
+运行 `kt-mcp tui` 查看全部用户实例，用上下键选择，Enter 进入详情。总览和详情都提供 **`n` 新建、`a` 全部操作、`b` 实例列表**。新建在原生表单中填写名称、工作区、端口及接入方式，保存后可选择立即启动；普通 `s` 与 CLI `instance start` 一致，只注册并启动，不隐式开启自启动或 linger。`a` 菜单可选择安装参数、自启动、linger、卸载、日志、导出、系统服务授权和软件更新。详细面板显示**含 MCP 访问令牌的完整连接地址**；`u` / `c` 查看链接或客户端 JSON，视图内按 `w` 保存完整文件；`l` 可跟随脱敏日志并选择条数。`q` 返回或退出，后台服务继续运行。
+按 `o` **Configure** 可修改选中实例的工作区、端口、接入方式及固定域名设置。面板先提醒并确认暂停该实例，确认后停止它再进入编辑；保存或取消后保持停止，按 `s` 启动，其他实例继续运行。已有 MCP 访问令牌保留，修改工作区会同步更新 systemd 工作目录。Review 中选择 `advanced` 可配置 cloudflared 路径和文件工具访问范围；保存冲突会保留输入并允许修改。完整入口对照见 [CLI/TUI 功能矩阵](docs/TUI_PARITY.md)。
 也可直接创建两个实例（项目路径必须已存在）：
 
 ```bash
@@ -53,13 +53,13 @@ kt-mcp tui
 
 命名实例使用 `kt-mcp instance link 名称`；旧默认实例使用 `kt-mcp link`，显式配置使用 `kt-mcp link --config /absolute/path/config.json`，输出完整单行 URL。local/named 的配置地址不代表服务已启动；quick 等待当前启动记录，未就绪或失效时不显示旧地址。启动验证不等于持续公网健康检查。主页长链接可滚动，日志和 Cloudflare Tunnel Token 继续脱敏；无色终端自动降级，`NO_COLOR=1 kt-mcp` 可关闭颜色并保留终端支持的粗体。
 
-后续升级只需：
+从 v0.3.1 起，可以在 `a` → **Software updates** 中检查、选择版本、安装及恢复中断更新；成功后自动重载新版 TUI。命令行仍可执行：
 
 ```bash
 kt-mcp update
 ```
 
-`kt-mcp update --check` 只检查新版本。更新沿用当前安装目录和 Python，先校验下载并试装，再暂停正在运行的用户服务；安装或启动失败时恢复完整旧环境。原本停止的服务保持停止，配置和访问令牌保留。
+`kt-mcp update --check` 只检查新版本，`kt-mcp update --recover` 恢复保留的中断事务。更新沿用当前安装目录和 Python，先校验下载并试装，再暂停正在运行的用户服务；安装或启动失败时恢复完整旧环境。原本停止的服务保持停止，配置和访问令牌保留。
 
 **从 v0.2.3 或更早版本首次升级**，旧 CLI 尚无 `update`，使用一次在线迁移入口：
 

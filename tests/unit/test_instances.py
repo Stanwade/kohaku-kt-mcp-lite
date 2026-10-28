@@ -331,18 +331,21 @@ def test_cancelled_setup_creates_no_config(tmp_path):
     assert not instances.config_path("cancelled").exists()
 
 
-def test_setup_rechecks_conflicts_at_save_and_keeps_failed_file_absent(tmp_path):
+def test_setup_rechecks_conflicts_at_save_and_keeps_failed_file_absent(
+    tmp_path, capsys
+):
     other = workspace(tmp_path, "competitor")
-    answers = iter(["", "", "", ""])
+    answers = iter(["", "", "", "", ":q"])
 
     def ask(prompt):
         answer = next(answers)
-        if "Save?" in prompt:
+        if "Save?" in prompt and not instances.config_path("competitor").exists():
             instances.create_instance("competitor", workspace=other, port=8765)
         return answer
 
-    with pytest.raises(instances.InstanceError, match="reserved"):
+    with pytest.raises(SetupCancelled):
         instances.setup_instance(tmp_path, "attempt", ask=ask)
+    assert "reserved by kt-mcp-competitor" in capsys.readouterr().out
     assert not instances.config_path("attempt").exists()
     assert instances.get_instance("competitor").port == 8765
 

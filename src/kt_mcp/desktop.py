@@ -26,9 +26,12 @@ class DesktopSettings:
     mode: str = "quick"
     public_origin: str = ""
     cloudflared: str = ""
+    allow_outside_workspace: bool = False
 
     def validate(self):
         Config(Path(self.workspace))
+        if type(self.allow_outside_workspace) is not bool:
+            raise ValueError("allow_outside_workspace must be a boolean")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             raise ValueError("端口必须为 1–65535 的整数")
         if self.mode not in ("local", "quick", "named"):
@@ -128,7 +131,12 @@ class DesktopService:
         server = server_thread = listener = None
         try:
             self.emit("state", "正在启动…")
-            runtime = Runtime(Config(Path(settings.workspace)))
+            runtime = Runtime(
+                Config(
+                    Path(settings.workspace),
+                    allow_outside_workspace=settings.allow_outside_workspace,
+                )
+            )
             origin = settings.public_origin if settings.mode == "named" else ""
             # Validate the origin before creating any external connection.
             app = create_app(

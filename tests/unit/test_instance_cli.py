@@ -22,6 +22,7 @@ def lifecycle(monkeypatch):
     class Manager:
         def __init__(self, name):
             self.name = name
+            self.system = False
 
         def status(self):
             return {"LoadState": "loaded" if self.name in states else "not-found"}
@@ -30,7 +31,8 @@ def lifecycle(monkeypatch):
             events.append(("install", self.name, path))
             states[self.name] = {"path": path, "active": False}
 
-    def inspect(name, *, expected_config):
+    def inspect(name, system=False, *, expected_config, expected_python=None):
+        assert not system
         if name not in states:
             return None
         assert expected_config == states[name]["path"]

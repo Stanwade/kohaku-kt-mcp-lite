@@ -21,12 +21,13 @@ from kt_mcp.managed_service import (
     assert_external_process,
     inspect_service,
     restore_unit,
-    start_service,
     stop_service,
 )
 from kt_mcp.onboarding import ConfigEditor, SetupCancelled, edit_config, setup_config
+from kt_mcp.operations import control_service, service_setting
 from kt_mcp.service import ServiceError, ServiceManager, render_unit
 from kt_mcp.terminal_style import TerminalStyle
+from kt_mcp.tui_update import ReloadTUI
 
 UI_ERRORS = (ValueError, TypeError, OSError, ServiceError, ManagedServiceError)
 
@@ -128,9 +129,9 @@ def next_steps(
     if load == "not-found":
         return (
             (
-                "Install with --system --run-as USER; [?] Help"
+                "[i] Install this system service; [a] Actions"
                 if system
-                else "[i] Install/start this user service"
+                else "[s] Register/start this instance  [a] Actions"
             ),
             "",
         )
@@ -523,87 +524,34 @@ class TerminalController:
         return shlex.join([os.path.abspath(sys.executable), "-m", "kt_mcp", *arguments])
 
     def help_text(self) -> str:
-        common = ["--name", self.manager.name]
-        if self.manager.system:
-            common.append("--system")
         lines = [
-            "First use:",
-            (
-                "System units require an explicit ordinary --run-as user. "
-                "Install with the command below; i is unavailable in this scope."
-                if self.manager.system
-                else "i registers the saved configuration, enables boot and user linger, "
-                "and starts the service."
-            ),
+            "Global navigation:",
+            "n creates a new instance; b opens the instance overview.",
+            "a opens all management actions without leaving this interface.",
+            "q returns to the overview from managed details, or closes an explicit panel.",
             "",
-            "s starts; x stops; r restarts. l opens logs.",
-            "o stops MCP after confirmation and edits the saved settings.",
-            "After saving or cancelling, use s to start again.",
-            (
-                "e enables boot. d only disables future automatic startup; "
-                "it does not stop a running service."
-            ),
-            "The home screen shows the MCP link. u opens the link and its one-line export command.",
-            "Up/Down/PgUp/PgDn scroll long home-screen links. c opens client JSON.",
-            "v shows details without credentials; l keeps credentials redacted in logs.",
-            (
-                "q returns to the instance list and leaves services unchanged."
-                if self.return_to_list
-                else "q quits this panel and leaves the service unchanged."
-            )
-            + " Uppercase keys also work.",
-            (
-                "State is the systemd process state. Startup verified / Tunnel started "
-                "requires a matching startup record; it is not a continuous health check."
-            ),
-            "Local/named links can be copied before startup; a configured link does not mean it is running.",
-            (
-                "Existing configurations keep their saved workspace; "
-                "changing your shell directory does not reconfigure the service."
-            ),
+            "This instance:",
+            "s registers if needed and starts; x stops; r restarts.",
+            "Start does not enable automatic startup or user linger.",
+            "o configures workspace, port and connection settings after a pause warning.",
+            "After saving or cancelling configuration, use s to start again.",
+            "u views or exports the MCP link; c views or exports client JSON.",
+            "l opens redacted logs; v shows service details.",
+            "e enables automatic startup; d disables it without stopping the service.",
+            "Use a for installation options, uninstall, linger, exports, updates and recovery.",
+            "",
+            "Up/Down/PgUp/PgDn scroll long links and viewers.",
+            "Uppercase shortcut keys work too.",
+            "A configured link does not mean the service is running.",
+            "Startup evidence does not continuously test public reachability.",
         ]
-        if not self.manager.system:
-            import pwd
-
-            account = pwd.getpwuid(os.geteuid()).pw_name
-            lines.extend(
-                [
-                    "",
-                    "g enables user linger so the user service can continue after logout.",
-                    "If enabling linger is denied, run in another terminal:",
-                    shlex.join(["sudo", "loginctl", "enable-linger", account]),
-                    "Then retry i for the first install/start, or g for linger only.",
-                ]
+        if self.manager.system:
+            lines[1] = (
+                "This panel manages a system service; user instances use a user session."
             )
-        lines.extend(
-            [
-                "",
-                "Reopen this panel with the same configuration and unit:",
-                self._command("tui", "--config", str(self.config_path), *common),
-                "",
-                "Inspect this unit:",
-                self._command("service", "status", *common),
-                "",
-                (
-                    "Install as root; replace RUN_USER with an ordinary account:"
-                    if self.manager.system
-                    else "Install/start this saved configuration from a terminal:"
-                ),
-                self._command(
-                    "service",
-                    "install",
-                    "--config",
-                    str(self.config_path),
-                    *common,
-                    "--now",
-                    *(
-                        ["--run-as", "RUN_USER"]
-                        if self.manager.system
-                        else ["--linger"]
-                    ),
-                ),
-            ]
-        )
+            lines.append(
+                "Install in a to select an ordinary service account and startup options."
+            )
         return self.redact("\n".join(lines))
 
     def details_text(self) -> str:
@@ -664,35 +612,31 @@ class TerminalController:
         if key == "i":
             if self.manager.system:
                 raise ValueError(
-                    "Install a system unit first with service install --system --run-as USER."
+                    "Use Actions > Install to choose the system service account."
                 )
             self._check_start_available()
             self.manager.install(self.config_path, now=True, linger=True)
             self._configuration_paused = False
             self.note = "Service registered and enabled; check MCP startup in the logs."
-        elif key in {"s", "x", "r", "e", "d"}:
+        elif key in {"s", "x", "r"}:
+            action = {"s": "start", "x": "stop", "r": "restart"}[key]
+            status = control_service(self.manager, self.config_path, action)
+            if isinstance(status, dict):
+                self.status = status
             if key in {"s", "r"}:
-                self._check_start_available()
-            if key in {"s", "r"} and self._configuration_paused:
-                binding = self._edit_binding()
-                if binding is None:
-                    raise ValueError("The configured service is no longer registered.")
-                self.status = start_service(binding)
                 self._configuration_paused = False
                 self.note = "MCP started; local connection verified."
-                return None
-            action = {
-                "s": "start",
-                "x": "stop",
-                "r": "restart",
-                "e": "enable",
-                "d": "disable",
-            }[key]
-            self.manager.control(action)
+            else:
+                self.note = "MCP stopped."
+        elif key in {"e", "d"}:
+            action = "enable" if key == "e" else "disable"
+            status = service_setting(self.manager, self.config_path, action)
+            if isinstance(status, dict):
+                self.status = status
             self.note = (
                 "Boot disabled; a running service is left unchanged."
                 if key == "d"
-                else f"{action}: request completed."
+                else "Automatic startup enabled."
             )
         elif key == "g":
             self.manager.enable_linger()
@@ -803,31 +747,23 @@ def _popup(screen, title: str, body: str):
 
 
 def _configure(screen, controller: TerminalController):
-    """Temporarily restore a normal terminal for input() and hidden getpass()."""
-    import curses
+    """Keep the shared pause/edit/save workflow inside the native interface."""
+    from kt_mcp.tui_forms import message, run_wizard
 
-    curses.def_prog_mode()
-    curses.endwin()
     try:
-        try:
-            controller.configure()
-        except UI_ERRORS as exc:
-            if not controller.note:
-                controller.note = controller.redact(f"Configuration not opened: {exc}")
-        print("\n" + TerminalStyle().text(controller.note, bold=True, color="yellow"))
-        try:
-            input("Press Enter to return to the panel: ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-    finally:
-        curses.reset_prog_mode()
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        screen.keypad(True)
-        screen.timeout(250)
-        screen.clearok(True)
+        run_wizard(
+            screen,
+            "Configure " + controller.manager.name,
+            controller.configure,
+        )
+    except SetupCancelled:
+        if not controller.note:
+            controller.note = "Configuration cancelled."
+    except UI_ERRORS as exc:
+        if not controller.note:
+            controller.note = controller.redact(f"Configuration not opened: {exc}")
+    if controller.note:
+        message(screen, "Configuration", controller.note)
 
 
 def _screen(screen, controller: TerminalController):
@@ -912,7 +848,7 @@ def _screen(screen, controller: TerminalController):
                 link_lines[link_offset : link_offset + link_page], 6
             ):
                 _put(screen, row, 2, line, styles["link" if link else "muted"])
-            link_hint = "[u] Link view and one-line export"
+            link_hint = "[o] Configure [u] Link [l] Logs [?] Help"
             if len(link_lines) > link_page:
                 link_hint = (
                     f"Lines {link_offset + 1}-{link_offset + link_page}/{len(link_lines)}"
@@ -942,8 +878,12 @@ def _screen(screen, controller: TerminalController):
                 screen,
                 height - 2,
                 2,
-                "[o] Configure [u] Link [l] Logs [?] Help [q] "
-                + ("Instances" if controller.return_to_list else "Quit panel"),
+                (
+                    "[a] Actions [q] Quit panel"
+                    if controller.manager.system
+                    else "[n] New [a] Actions [b] Instances [q] "
+                    + ("Back" if controller.return_to_list else "Quit")
+                ),
             )
             _put(
                 screen,
@@ -974,26 +914,77 @@ def _screen(screen, controller: TerminalController):
         if key < 0 or key > 255:
             continue
         character = chr(key).lower()
-        if character not in "oisxredglcuv?":
+        if character not in "naboisxredglcuv?":
             continue
         previous_note = controller.note
-        if character not in "v?o":
+        if character not in "nabv?oulcig":
             controller.note = "Working..."
             _put(screen, height - 1, 1, controller.note)
             screen.refresh()
         try:
-            if character == "o":
+            from kt_mcp import tui_actions
+            from kt_mcp.tui_forms import message
+
+            popup = None
+            if character in {"n", "b"}:
+                if controller.manager.system:
+                    message(
+                        screen,
+                        "System service",
+                        "This panel manages system services. User instances are managed in a user session.",
+                    )
+                else:
+                    return "new" if character == "n" else "instances"
+            elif character == "a":
+                destination = tui_actions.actions_menu(screen, controller)
+                if destination is not None:
+                    return destination
+            elif character == "o":
                 _configure(screen, controller)
-                popup = None
+            elif character == "i":
+                tui_actions.install_dialog(screen, controller)
+            elif character == "g":
+                tui_actions._enable_linger(screen, controller)
+            elif character == "l":
+                tui_actions.show_logs(screen, controller)
+            elif character in {"u", "c"}:
+                tui_actions.show_export(
+                    screen,
+                    controller,
+                    kind="link" if character == "u" else "client-config",
+                )
             else:
                 popup = controller.act(character)
             if popup:
                 _popup(screen, *popup)
                 controller.note = previous_note
+        except SetupCancelled:
+            controller.note = "Operation cancelled."
         except UI_ERRORS as exc:
             controller.note = controller.redact(str(exc))
             _popup(screen, "Action could not be completed", controller.note)
         next_refresh = 0.0
+
+
+def _first_configuration(screen, path, name, system):
+    """Create an explicit configuration inside curses before opening its panel."""
+    from kt_mcp import tui_actions
+    from kt_mcp.instance_tui import single_screen
+    from kt_mcp.tui_forms import run_wizard
+
+    if system:
+        if not tui_actions.prepare_system_config(screen, path):
+            return
+    else:
+        try:
+            run_wizard(
+                screen,
+                "New configuration",
+                lambda **readers: setup_config(path, **readers),
+            )
+        except SetupCancelled:
+            return
+    single_screen(screen, TerminalController(ServiceManager(name, system), path))
 
 
 def main(argv: list[str]) -> int:
@@ -1028,42 +1019,57 @@ def main(argv: list[str]) -> int:
     try:
         import curses
 
+        from kt_mcp.instance_tui import (
+            InstanceManagerController,
+            instance_screen,
+            single_screen,
+        )
+
         locale.setlocale(locale.LC_ALL, "")
         if args.config is not None or args.name is not None or args.system:
             path = (args.config or default_config_path()).expanduser().absolute()
-            if not path.exists():
-                if args.system:
-                    raise ValueError(
-                        "create the configuration as the run user and install the system unit first"
-                    )
-                setup_config(path)
-            controller = TerminalController(
-                ServiceManager(args.name or "kt-mcp", args.system), path
-            )
-            curses.wrapper(_screen, controller)
+            name = args.name or "kt-mcp"
+            if path.exists():
+                controller = TerminalController(ServiceManager(name, args.system), path)
+                curses.wrapper(single_screen, controller)
+            else:
+                curses.wrapper(_first_configuration, path, name, args.system)
         else:
             from kt_mcp import instances
-            from kt_mcp.instance_tui import InstanceManagerController, instance_screen
 
             selected = None
+            missing_workspace = None
             if args.instance is not None:
                 selected = instances.get_instance(args.instance)
             elif args.workspace is not None:
                 selected = instances.find_workspace(args.workspace)
                 if selected is None:
-                    selected = instances.setup_instance(workspace=args.workspace)
+                    missing_workspace = args.workspace
             manager = InstanceManagerController(
                 selected_name=selected.name if selected is not None else None
             )
-            curses.wrapper(instance_screen, manager, selected is not None)
+            curses.wrapper(
+                instance_screen,
+                manager,
+                args.instance is not None,
+                None,
+                missing_workspace,
+            )
+    except ReloadTUI as reload:
+        try:
+            os.execv(
+                sys.executable,
+                [sys.executable, "-I", "-m", "kt_mcp", "tui", *reload.argv],
+            )
+        except OSError as exc:
+            parser.error(f"Updated program could not reopen its interface: {exc}")
     except ImportError:
         parser.error("this Python installation needs curses support")
     except curses.error:
         parser.error(
             "terminal initialization failed; check TERM and use an interactive terminal"
         )
-    except SetupCancelled as exc:
-        print(str(exc))
+    except SetupCancelled:
         return 0
     except (KeyboardInterrupt, EOFError):
         return 0

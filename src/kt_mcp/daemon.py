@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from kt_mcp.auth import MCPPathAuth
-from kt_mcp.desktop import DesktopService, DesktopSettings, client_configuration
+from kt_mcp.desktop import DesktopService, DesktopSettings
 
 
 def default_config_path() -> Path:
@@ -277,6 +277,7 @@ def main(argv: list[str]) -> int:
     init.add_argument("--mode", choices=("local", "quick", "named"), default="local")
     init.add_argument("--public-origin", default="")
     init.add_argument("--cloudflared", default="")
+    init.add_argument("--allow-outside-workspace", action="store_true")
     for name, help_text in (
         ("daemon", "Run the service in the foreground"),
         ("client-config", "Print MCP client JSON"),
@@ -284,6 +285,12 @@ def main(argv: list[str]) -> int:
     ):
         child = commands.add_parser(name, help=help_text)
         child.add_argument("--config", type=Path, default=default_config_path())
+        if name in {"link", "client-config"}:
+            child.add_argument(
+                "--output", type=Path, help="Create a private export file"
+            )
+        if name == "client-config":
+            child.add_argument("--transport", choices=["http", "stdio"], default="http")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         parser.error("daemon management requires Linux; use the desktop GUI on Windows")
@@ -305,6 +312,7 @@ def main(argv: list[str]) -> int:
                             mode=args.mode,
                             public_origin=args.public_origin,
                             cloudflared=args.cloudflared,
+                            allow_outside_workspace=args.allow_outside_workspace,
                         ),
                     )
                 except SetupCancelled as exc:
@@ -318,6 +326,7 @@ def main(argv: list[str]) -> int:
                         args.mode,
                         args.public_origin,
                         args.cloudflared,
+                        allow_outside_workspace=args.allow_outside_workspace,
                     ),
                     os.environ.get("KT_MCP_TOKEN") or secrets.token_urlsafe(32),
                     os.environ.get("TUNNEL_TOKEN", ""),
@@ -331,9 +340,16 @@ def main(argv: list[str]) -> int:
             print("Press i to start the service; the panel shows your MCP link.")
             return 0
         if args.command in {"client-config", "link"}:
-            config = load_config(args.config)
-            url = client_url(config, args.config)
-            print(url if args.command == "link" else client_configuration(url))
+            from kt_mcp.operations import export_text, write_export
+
+            kind = args.command
+            if kind == "client-config" and args.transport == "stdio":
+                kind = "stdio"
+            text = export_text(args.config, kind)
+            if args.output is not None:
+                print(f"Exported to {write_export(args.output, text)}")
+            else:
+                print(text)
             return 0
         return run_daemon(args.config)
     except (ValueError, OSError, TypeError) as exc:

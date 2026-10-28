@@ -414,6 +414,7 @@ def create_instance(
     public_origin: str = "",
     cloudflared: str = "",
     tunnel_token: str = "",
+    allow_outside_workspace: bool = False,
 ) -> Instance:
     name = canonical_name(name)
     workspace = Path(workspace).expanduser().resolve()
@@ -426,6 +427,7 @@ def create_instance(
                 mode=mode,
                 public_origin=public_origin,
                 cloudflared=cloudflared,
+                allow_outside_workspace=allow_outside_workspace,
             ),
             secrets.token_urlsafe(32),
             tunnel_token,
@@ -470,5 +472,6 @@ def setup_instance(
         save=publish,
         title="New instance" if name is None else "New instance · " + name,
         destination=lambda config: config_path(final_name(config)),
+        retry_save=True,
     )
     return saved
