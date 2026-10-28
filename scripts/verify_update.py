@@ -211,6 +211,18 @@ def make_fixtures(bundle: Path, version: str, root: Path, prefix: Path):
     return transport, marker
 
 
+def redact_diagnostic(message, secrets=()):
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+    message = re.sub(r"/mcp/[^\s/\"'<>]+", "/mcp/[REDACTED]", message)
+    return re.sub(
+        r"(?i)([a-z][a-z0-9+.-]*://)[^\s/?#]*@",
+        r"\1[REDACTED]@",
+        message,
+    )
+
+
 def execute(arguments, *, cwd, environment, token="", fails=False, timeout=900):
     process = subprocess.Popen(
         [str(argument) for argument in arguments],
@@ -235,10 +247,22 @@ def execute(arguments, *, cwd, environment, token="", fails=False, timeout=900):
             process.communicate(timeout=10)
         raise
     require(not token or token not in output + error, "a command exposed the MCP token")
-    require(
-        process.returncode != 0 if fails else process.returncode == 0,
-        "installed update verification command returned an unexpected exit status",
-    )
+    expected = process.returncode != 0 if fails else process.returncode == 0
+    if not expected:
+        message = (
+            "installed update verification command returned an unexpected exit status"
+        )
+        # Only this CLI owns controlled progress/errors; never expose raw pip or
+        # transport output from other verification commands.
+        if (
+            len(arguments) >= 2
+            and Path(arguments[0]).name == "kt-mcp"
+            and str(arguments[1]) == "update"
+        ):
+            summary = redact_diagnostic(output + "\n" + error, (token,)).strip()
+            if summary:
+                message += "\nUpdater output (sanitized):\n" + summary[-2400:]
+        require(False, message)
     return output
 
 
@@ -603,10 +627,8 @@ def main(argv=None):
             if isinstance(error, KeyboardInterrupt)
             else str(error)
         )
-        for secret in sensitive:
-            message = message.replace(secret, "[REDACTED]")
-        message = re.sub(r"/mcp/[A-Za-z0-9_-]+", "/mcp/[REDACTED]", message)
-        report["error"] = type(error).__name__ + ": " + message[:2000]
+        message = redact_diagnostic(message, sensitive)
+        report["error"] = type(error).__name__ + ": " + message[:3000]
     path = arguments.report.expanduser().absolute()
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix="." + path.name, dir=path.parent)
