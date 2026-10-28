@@ -8,18 +8,22 @@ kt_mcp_online_install() (
         cat <<'HELP'
 Usage: install.sh [OPTIONS]
        curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh | bash
-       curl -fsSL URL | bash -s -- --version 0.2.3 --prefix "/path/to/installation"
+       curl -fsSL URL | bash -s -- --version 0.2.4 --prefix "/path/to/installation"
 
   --version VERSION  Stable release X.Y.Z or vX.Y.Z (default: latest release)
   --prefix DIR       Forward the installation directory to the bundled installer
   --bin-dir DIR      Forward the command-link directory (default: ~/.local/bin)
   --python EXEC      Python 3.10+ executable (default: python3)
   --no-link          Do not create a convenience command link
+  --update           Upgrade an existing installation, preserving service state
+  --name NAME        User service to resume (with --update; usually detected)
   --help, -h         Show this help
 
 Run as your ordinary Linux user, without sudo. This bootstrap downloads only
 official Stanwade/kohaku-kt-mcp-lite release assets and verifies their checksums.
-It does not change your shell profile, create MCP configuration, or start services.
+Fresh installs do not change your shell profile, create configuration, or start services.
+With --update, a running managed user service pauses during installation and resumes
+after verification. Future updates need only: kt-mcp update
 HELP
     }
 
@@ -28,9 +32,11 @@ HELP
     kt_prefix=""
     kt_bin_dir=""
     kt_no_link=0
+    kt_update=0
+    kt_service_name=""
     while (( $# )); do
         case "$1" in
-            --version|--prefix|--bin-dir|--python)
+            --version|--prefix|--bin-dir|--python|--name)
                 (( $# >= 2 )) || kt_die "$1 requires a value"
                 [[ -n "$2" ]] || kt_die "$1 requires a non-empty value"
                 if [[ "$1" == "--version" ]]; then
@@ -41,13 +47,21 @@ HELP
                     [[ "$1" != "--prefix" ]] || kt_prefix="$2"
                     [[ "$1" != "--python" ]] || kt_python="$2"
                     [[ "$1" != "--bin-dir" ]] || kt_bin_dir="$2"
+                    [[ "$1" != "--name" ]] || kt_service_name="$2"
                 fi
                 shift 2 ;;
             --no-link) kt_no_link=1; shift ;;
+            --update) kt_update=1; shift ;;
             --help|-h) kt_help; exit 0 ;;
             *) kt_die "unknown argument: $1 (see --help)" ;;
         esac
     done
+    if (( kt_update )); then
+        [[ -z "$kt_bin_dir" && "$kt_no_link" == 0 ]] ||
+            kt_die "--update preserves existing command links; omit --bin-dir and --no-link"
+    else
+        [[ -z "$kt_service_name" ]] || kt_die "--name requires --update"
+    fi
 
     printf 'Checking Linux installation prerequisites...\n'
     for kt_tool in uname mktemp rm bash; do
@@ -246,6 +260,40 @@ except (OSError, ValueError, UnicodeError, tarfile.TarError, EOFError):
     raise SystemExit("kt-mcp bootstrap: invalid or unreadable release archive") from None
 PY
 )"
+    if (( kt_update )); then
+        printf 'Preparing the verified updater...\n'
+        "$kt_python_path" -I - "$kt_bundle" "$kt_temporary" "$kt_prefix" "$kt_version" "$kt_service_name" <<'PY'
+import sys
+import zipfile
+from pathlib import Path
+
+bundle, temporary, prefix = map(Path, sys.argv[1:4])
+version, name = sys.argv[4:6]
+wheel = bundle / f"kohaku_kt_mcp-{version}-py3-none-any.whl"
+runtime = temporary / "runtime"
+runtime.mkdir(mode=0o700)
+(runtime / "__init__.py").write_text("", encoding="utf-8")
+try:
+    with zipfile.ZipFile(wheel) as archive:
+        for module in ("bootstrap_update", "update", "releases", "managed_service", "terminal_style"):
+            entry = f"kt_mcp/{module}.py"
+            if archive.namelist().count(entry) != 1 or archive.getinfo(entry).file_size > 131072:
+                raise ValueError("updater module missing or invalid")
+            (runtime / f"{module}.py").write_bytes(archive.read(entry))
+except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+    raise SystemExit("kt-mcp bootstrap: this release does not contain a usable automatic updater") from None
+sys.path.insert(0, str(temporary))
+from runtime.releases import ReleaseError, check_wheel
+from runtime.bootstrap_update import main
+
+try:
+    check_wheel(wheel, version)
+except ReleaseError as error:
+    raise SystemExit("kt-mcp bootstrap: " + str(error)) from None
+raise SystemExit(main(prefix, temporary / "SHA256SUMS", version, name or None))
+PY
+        exit 0
+    fi
     printf 'Installing the verified release...\n'
     (
         # Older bundled installers use Python without -I. Keep project modules

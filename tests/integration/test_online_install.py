@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,11 +117,15 @@ raise SystemExit(route.get("exit_code", 0))
             + ' "$0" "$@"\n'
         ).encode()
 
-    def release(self, version="9.8.7", *, unsafe=None):
+    def release(self, version="9.8.7", *, unsafe=None, wheel_data=None):
         bundle_root = f"kt-mcp-{version}-linux"
         wheel = f"kohaku_kt_mcp-{version}-py3-none-any.whl"
         files = {
-            wheel: b"offline fixture wheel; the fixture installer never invokes pip",
+            wheel: (
+                wheel_data
+                if wheel_data is not None
+                else b"offline fixture wheel; the fixture installer never invokes pip"
+            ),
             "install.sh": self.installer_script(),
             "README.md": b"Offline fixture README\n",
             "UBUNTU.md": b"Offline fixture Ubuntu guide\n",
@@ -480,3 +485,53 @@ def test_root_is_rejected_before_network(offline_install):
     assert offline_install.urls() == []
     assert not offline_install.install_log.exists()
     offline_install.assert_clean()
+
+
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        (["--name", "kt-mcp-project"], "--name requires --update"),
+        (
+            ["--update", "--bin-dir", "./different-bin"],
+            "preserves existing command links",
+        ),
+        (["--update", "--no-link"], "preserves existing command links"),
+    ],
+)
+def test_update_options_are_checked_before_download_or_installation(
+    offline_install, arguments, message
+):
+    result = offline_install.run(*arguments)
+    assert result.returncode != 0
+    assert message in result.stdout + result.stderr
+    assert offline_install.urls() == []
+    assert not offline_install.install_log.exists()
+    offline_install.assert_clean()
+
+
+def test_release_without_update_modules_cannot_modify_an_existing_install(
+    ordinary_install,
+):
+    fixture = ordinary_install
+    wheel = io.BytesIO()
+    with zipfile.ZipFile(wheel, "w") as package:
+        package.writestr("kt_mcp/__init__.py", '__version__ = "0.2.3"\n')
+        package.writestr(
+            "kohaku_kt_mcp-0.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: kohaku-kt-mcp\nVersion: 0.2.3\n",
+        )
+    release = fixture.release("0.2.3", wheel_data=wheel.getvalue())
+    prefix = fixture.root / "old custom installation"
+    (prefix / "venv").mkdir(parents=True)
+    saved = prefix / "venv/old-package"
+    saved.write_bytes(b"existing installation data")
+    result = fixture.run(
+        "--update", "--version", release.version, "--prefix", str(prefix)
+    )
+    assert result.returncode != 0
+    assert "usable automatic updater" in result.stdout + result.stderr
+    assert "Traceback" not in result.stdout + result.stderr
+    assert fixture.urls() == [release.manifest_url, release.archive_url]
+    assert saved.read_bytes() == b"existing installation data"
+    assert not fixture.install_log.exists()
+    fixture.assert_clean()
