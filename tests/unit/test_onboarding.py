@@ -593,3 +593,25 @@ def test_root_edit_preserves_the_original_non_root_owner(existing_configuration)
     editor.restore()
     assert (path.stat().st_uid, path.stat().st_gid) == (65534, 65534)
     assert load_config(path) == original
+
+
+def test_edit_service_check_runs_before_any_configuration_publication(
+    existing_configuration,
+):
+    path, _ = existing_configuration
+    original = path.read_bytes()
+
+    def check(config):
+        assert config.settings.mode == "local"
+        assert path.read_bytes() == original
+        raise RuntimeError("fixture service is no longer stopped")
+
+    with pytest.raises(RuntimeError, match="no longer stopped"):
+        edit_config(
+            path,
+            ask=EditInputs(["", "", "local", ""], path),
+            ask_secret=no_secret,
+            before_save=check,
+        )
+
+    assert path.read_bytes() == original

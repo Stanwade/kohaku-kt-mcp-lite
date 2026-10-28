@@ -230,7 +230,7 @@ def test_small_terminal_ignores_hidden_stop_key(terminal, monkeypatch):
 
     class SmallScreen:
         def __init__(self):
-            self.keys = iter((ord("x"), ord("q")))
+            self.keys = iter((ord("x"), ord("o"), ord("q")))
 
         def getmaxyx(self):
             return 10, 40
@@ -378,6 +378,9 @@ class RecordingScreen:
     def timeout(self, milliseconds):
         pass
 
+    def clearok(self, enabled):
+        self.clear_requested = enabled
+
     def erase(self):
         self.drawn = []
         self.styled = []
@@ -453,6 +456,7 @@ def test_64_column_panel_shows_the_complete_link_and_workspace_name(
     assert not any(call[0] == "logs" for call in terminal.manager.calls)
     assert "Recent service log" not in "\n".join(texts)
     assert "[u] Link" in "\n".join(texts)
+    assert "[o] Configure" in "\n".join(texts)
     assert any(
         attribute & curses.A_BOLD
         for _, _, text, attribute in screen.style_frames[-1]
@@ -801,6 +805,438 @@ def test_monochrome_style_keeps_bold_without_color_pairs(monkeypatch, no_color):
     assert styles["title"] & curses.A_BOLD
     assert styles["link"] & curses.A_BOLD
     assert all(attribute & curses.A_COLOR == 0 for attribute in styles.values())
+
+
+@pytest.fixture
+def editable_service(terminal, monkeypatch, tmp_path):
+    unit = tmp_path / "kt-mcp-test.service"
+    unit.write_bytes(b"original generated unit\n")
+    unit.chmod(0o644)
+    terminal.manager.unit_path = unit
+    terminal.manager.status_data = active_status()
+    events = []
+
+    def binding():
+        info = unit.stat()
+        owner = terminal.path.stat()
+        return SimpleNamespace(
+            name=terminal.manager.name,
+            system=terminal.manager.system,
+            unit_path=unit,
+            python=Path(sys.executable),
+            config_path=terminal.path,
+            run_as="service-user" if terminal.manager.system else None,
+            owner_uid=owner.st_uid,
+            owner_gid=owner.st_gid,
+            unit_bytes=unit.read_bytes(),
+            status=dict(terminal.manager.status_data),
+            unit_mode=info.st_mode & 0o7777,
+            unit_owner_uid=info.st_uid,
+            unit_owner_gid=info.st_gid,
+        )
+
+    def inspect(name, system, **options):
+        assert name == terminal.manager.name
+        assert system == terminal.manager.system
+        assert options == {
+            "expected_python": sys.executable,
+            "expected_config": terminal.path,
+        }
+        events.append(("inspect",))
+        return binding()
+
+    def stop(current):
+        events.append(("stop", current.unit_bytes))
+        terminal.manager.status_data.update(
+            ActiveState="inactive", SubState="dead", MainPID="0"
+        )
+
+    def render(path, *, system=False, run_as=None):
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        return "new generated unit\nWorkingDirectory=" + saved["workspace"] + "\n"
+
+    def install(path, **options):
+        events.append(("install",))
+        terminal.manager.calls.append(("install", path, options))
+        unit.write_text(
+            render(path, system=terminal.manager.system, run_as=options["run_as"]),
+            encoding="utf-8",
+        )
+
+    def restore(current, *, expected_unit_bytes=None):
+        events.append(("restore",))
+        assert unit.read_bytes() in {current.unit_bytes, expected_unit_bytes}
+        unit.write_bytes(current.unit_bytes)
+
+    def start(current):
+        events.append(("start", current.unit_bytes))
+        terminal.manager.status_data.update(
+            ActiveState="active", SubState="running", MainPID="12345"
+        )
+        return dict(terminal.manager.status_data)
+
+    monkeypatch.setattr(module, "inspect_service", inspect)
+    monkeypatch.setattr(module, "assert_external_process", lambda current: None)
+    monkeypatch.setattr(module, "stop_service", stop)
+    monkeypatch.setattr(module, "render_unit", render)
+    monkeypatch.setattr(module, "restore_unit", restore)
+    monkeypatch.setattr(module, "start_service", start)
+    monkeypatch.setattr(terminal.manager, "install", install)
+    terminal.events = events
+    terminal.original_unit = unit.read_bytes()
+    terminal.install = install
+    return terminal
+
+
+def answers(values):
+    remaining = iter(values)
+
+    def ask(prompt):
+        value = next(remaining)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    return ask
+
+
+def test_configure_stops_after_confirmation_and_requires_an_explicit_start(
+    editable_service, tmp_path, capsys
+):
+    fixture = editable_service
+    workspace = tmp_path / "new workspace 中文"
+    workspace.mkdir()
+    original = fixture.path.read_bytes()
+    entered = iter(["y", str(workspace), "8123", "local", ""])
+    first = True
+
+    def ask(prompt):
+        nonlocal first
+        if first:
+            assert "Stop MCP" in prompt and "y/N" in prompt
+            assert not any(event[0] == "stop" for event in fixture.events)
+            first = False
+        else:
+            assert fixture.manager.status_data["ActiveState"] == "inactive"
+            assert fixture.path.read_bytes() == original
+        return next(entered)
+
+    fixture.controller.configure(ask=ask)
+
+    assert fixture.manager.calls == [
+        (
+            "install",
+            fixture.path,
+            {
+                "replace": True,
+                "run_as": None,
+                "now": False,
+                "enable": False,
+                "linger": False,
+            },
+        )
+    ]
+    assert [event[0] for event in fixture.events if event[0] != "inspect"] == [
+        "stop",
+        "install",
+    ]
+    assert fixture.manager.status_data["MainPID"] == "0"
+    saved = json.loads(fixture.path.read_text(encoding="utf-8"))
+    assert saved["workspace"] == str(workspace)
+    assert saved["mode"] == "local" and saved["port"] == 8123
+    assert saved["token"] == MCP_TOKEN
+    assert str(workspace).encode() in fixture.manager.unit_path.read_bytes()
+    assert "[s] Start" in fixture.controller.note
+    assert "MCP will stop" in capsys.readouterr().out
+
+    updated_unit = fixture.manager.unit_path.read_bytes()
+    fixture.controller.act("s")
+    assert fixture.events[-2:] == [("inspect",), ("start", updated_unit)]
+    assert fixture.manager.status_data["ActiveState"] == "active"
+
+
+@pytest.mark.parametrize("answer", ["", ":q", EOFError(), KeyboardInterrupt()])
+def test_declining_configuration_does_not_stop_or_write(editable_service, answer):
+    fixture = editable_service
+    original = fixture.path.read_bytes()
+
+    fixture.controller.configure(ask=answers([answer]))
+
+    assert fixture.path.read_bytes() == original
+    assert fixture.manager.unit_path.read_bytes() == fixture.original_unit
+    assert fixture.manager.status_data["ActiveState"] == "active"
+    assert not fixture.manager.calls
+    assert all(event[0] == "inspect" for event in fixture.events)
+
+
+@pytest.mark.parametrize("stage", ["inspect_service", "assert_external_process"])
+def test_unsafe_binding_or_same_cgroup_is_rejected_before_confirmation(
+    editable_service, monkeypatch, stage
+):
+    fixture = editable_service
+    original = fixture.path.read_bytes()
+
+    def refuse(*args, **kwargs):
+        raise module.ManagedServiceError("fixture binding cannot be trusted")
+
+    monkeypatch.setattr(module, stage, refuse)
+
+    def no_prompt(prompt):
+        pytest.fail("an unverified service must not offer a stop/edit confirmation")
+
+    with pytest.raises(module.ManagedServiceError, match="cannot be trusted"):
+        fixture.controller.configure(ask=no_prompt)
+
+    assert fixture.path.read_bytes() == original
+    assert not fixture.manager.calls
+    assert not any(event[0] == "stop" for event in fixture.events)
+
+
+def test_stop_failure_does_not_open_the_editor_or_change_configuration(
+    editable_service, monkeypatch
+):
+    fixture = editable_service
+    original = fixture.path.read_bytes()
+    prompts = []
+
+    def stop(binding):
+        raise module.ManagedServiceError("fixture stop timed out")
+
+    def ask(prompt):
+        prompts.append(prompt)
+        assert len(prompts) == 1, "the editor opened before stop was confirmed"
+        return "y"
+
+    monkeypatch.setattr(module, "stop_service", stop)
+
+    with pytest.raises(module.ManagedServiceError, match="stop timed out"):
+        fixture.controller.configure(ask=ask)
+
+    assert fixture.path.read_bytes() == original
+    assert fixture.manager.unit_path.read_bytes() == fixture.original_unit
+    assert not fixture.manager.calls
+    assert "remains stopped" not in fixture.controller.note
+
+
+def test_cancelling_after_stop_keeps_old_settings_and_does_not_restart(
+    editable_service,
+):
+    fixture = editable_service
+    original = fixture.path.read_bytes()
+
+    fixture.controller.configure(ask=answers(["y", ":q"]))
+
+    assert fixture.path.read_bytes() == original
+    assert fixture.manager.unit_path.read_bytes() == fixture.original_unit
+    assert fixture.manager.status_data["ActiveState"] == "inactive"
+    assert not fixture.manager.calls
+    assert [event[0] for event in fixture.events if event[0] != "inspect"] == ["stop"]
+    assert "remains stopped" in fixture.controller.note
+    assert "[s] Start" in fixture.controller.note
+
+
+def test_failed_unit_reload_restores_both_files_and_redacts_saved_and_new_credentials(
+    editable_service, monkeypatch, capsys
+):
+    fixture = editable_service
+    original = fixture.path.read_bytes()
+    changed_secret = "new-hidden-tunnel-credential"
+    environment_token = "environment-access-token-" + "b" * 32
+    monkeypatch.setenv("KT_MCP_TOKEN", environment_token)
+    monkeypatch.setenv("TUNNEL_TOKEN", "environment-tunnel-credential")
+    fixture.controller = TerminalController(fixture.manager, fixture.path)
+    failure = module.ServiceError(
+        "fixture reload failed: "
+        + MCP_TOKEN
+        + " "
+        + TUNNEL_TOKEN
+        + " "
+        + changed_secret
+        + " "
+        + environment_token
+    )
+
+    def install(path, **options):
+        fixture.install(path, **options)
+        raise failure
+
+    monkeypatch.setattr(fixture.manager, "install", install)
+
+    with pytest.raises(module.ServiceError) as result:
+        fixture.controller.configure(
+            ask=answers(["y", "", "8123", "", "", ""]),
+            ask_secret=answers([changed_secret]),
+        )
+
+    assert result.value is failure, "rollback replaced the original failure"
+    assert fixture.path.read_bytes() == original
+    assert fixture.manager.unit_path.read_bytes() == fixture.original_unit
+    assert fixture.manager.status_data["ActiveState"] == "inactive"
+    assert not any(event[0] == "start" for event in fixture.events)
+    assert "fixture reload failed" in fixture.controller.note
+    shown = fixture.controller.note + capsys.readouterr().out
+    for secret in (MCP_TOKEN, TUNNEL_TOKEN, changed_secret, environment_token):
+        assert secret not in shown, "configuration diagnostics leaked a credential"
+
+
+def test_rollback_failure_preserves_original_error_and_attempts_config_restoration(
+    editable_service, monkeypatch
+):
+    fixture = editable_service
+    original = fixture.path.read_bytes()
+    failure = module.ServiceError("original reload failure")
+
+    def install(path, **options):
+        fixture.install(path, **options)
+        raise failure
+
+    def restore(*args, **kwargs):
+        raise module.ManagedServiceError("unit recovery failed")
+
+    monkeypatch.setattr(fixture.manager, "install", install)
+    monkeypatch.setattr(module, "restore_unit", restore)
+
+    with pytest.raises(module.ServiceError) as result:
+        fixture.controller.configure(ask=answers(["y", "", "", "local", ""]))
+
+    assert result.value is failure
+    assert fixture.path.read_bytes() == original
+    assert "original reload failure" in fixture.controller.note
+    assert "Recovery incomplete" in fixture.controller.note
+    assert "unit recovery failed" in fixture.controller.note
+    assert not any(event[0] == "start" for event in fixture.events)
+
+
+def test_unit_changed_during_editing_is_not_overwritten(editable_service):
+    fixture = editable_service
+    original = fixture.path.read_bytes()
+    entered = answers(["y", "", "", "local"])
+
+    def ask(prompt):
+        if "Save?" not in prompt:
+            return entered(prompt)
+        fixture.manager.unit_path.write_bytes(b"external unit change\n")
+        return ""
+
+    with pytest.raises(module.ManagedServiceError, match="changed during editing"):
+        fixture.controller.configure(ask=ask)
+
+    assert fixture.path.read_bytes() == original
+    assert fixture.manager.unit_path.read_bytes() == b"external unit change\n"
+    assert not fixture.manager.calls
+    assert not any(event[0] == "start" for event in fixture.events)
+
+
+def test_system_reconfiguration_keeps_the_verified_run_account(
+    editable_service, monkeypatch
+):
+    fixture = editable_service
+    fixture.manager.system = True
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+
+    fixture.controller.configure(ask=answers(["y", "", "", "local", ""]))
+
+    assert fixture.manager.calls[0][2] == {
+        "replace": True,
+        "run_as": "service-user",
+        "now": False,
+        "enable": False,
+        "linger": False,
+    }
+    assert fixture.manager.status_data["ActiveState"] == "inactive"
+
+
+@pytest.mark.parametrize("appears_during_edit", [False, True])
+def test_live_manual_daemon_blocks_unregistered_configuration_without_stopping_it(
+    terminal, monkeypatch, appears_during_edit
+):
+    original = terminal.path.read_bytes()
+    startup = terminal.path.with_suffix(".status.json")
+    probes = []
+    monkeypatch.setattr(module, "inspect_service", lambda *args, **kwargs: None)
+
+    def record():
+        startup.write_text(json.dumps({"pid": 12345}), encoding="utf-8")
+        startup.chmod(0o600)
+
+    def probe(pid, signal):
+        probes.append((pid, signal))
+        assert signal == 0, "configuration attempted to signal a manual daemon"
+
+    monkeypatch.setattr(module.os, "kill", probe)
+    if not appears_during_edit:
+        record()
+    entered = answers(["y", "", "", "local"])
+
+    def ask(prompt):
+        if not appears_during_edit:
+            pytest.fail(
+                "a live manual daemon must block configuration before prompting"
+            )
+        if "Save?" not in prompt:
+            return entered(prompt)
+        record()
+        return ""
+
+    with pytest.raises(
+        module.ManagedServiceError, match="manual daemon.*still running"
+    ):
+        terminal.controller.configure(ask=ask)
+
+    assert probes == [(12345, 0)]
+    assert terminal.path.read_bytes() == original
+    assert json.loads(startup.read_text()) == {"pid": 12345}
+    assert not terminal.manager.calls
+
+
+def test_confirmed_missing_unit_allows_configuration_without_registering_a_service(
+    terminal, monkeypatch
+):
+    monkeypatch.setattr(module, "inspect_service", lambda *args, **kwargs: None)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("configuration-only editing must not control a service")
+
+    monkeypatch.setattr(module, "stop_service", unexpected)
+    monkeypatch.setattr(module, "start_service", unexpected)
+    monkeypatch.setattr(module, "render_unit", unexpected)
+
+    terminal.controller.configure(ask=answers(["y", "", "", "local", ""]))
+
+    assert json.loads(terminal.path.read_text())["mode"] == "local"
+    assert not terminal.manager.calls
+    assert "[i] Install/start" in terminal.controller.note
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_configuration_restores_curses_after_normal_input_and_errors(
+    terminal, monkeypatch, failure
+):
+    import builtins
+    import curses
+
+    operations = []
+    monkeypatch.setattr(curses, "def_prog_mode", lambda: operations.append("save"))
+    monkeypatch.setattr(curses, "endwin", lambda: operations.append("leave"))
+    monkeypatch.setattr(curses, "reset_prog_mode", lambda: operations.append("resume"))
+    monkeypatch.setattr(curses, "curs_set", lambda value: None)
+    monkeypatch.setattr(builtins, "input", lambda prompt: "")
+
+    def configure():
+        assert operations == ["save", "leave"]
+        operations.append("configure")
+        if failure:
+            raise module.ServiceError("fixture configure failure " + TUNNEL_TOKEN)
+        terminal.controller.note = "Changes cancelled. MCP remains stopped."
+
+    monkeypatch.setattr(terminal.controller, "configure", configure)
+    screen = RecordingScreen([])
+
+    module._configure(screen, terminal.controller)
+
+    assert operations == ["save", "leave", "configure", "resume"]
+    assert screen.clear_requested
+    assert TUNNEL_TOKEN not in terminal.controller.note
 
 
 def test_color_styles_emphasize_the_link_and_semantic_states(monkeypatch):

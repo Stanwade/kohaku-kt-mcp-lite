@@ -284,16 +284,24 @@ def edit_config(
     ask: Callable[[str], str] | None = None,
     ask_secret: Callable[[str], str] | None = None,
     editor: ConfigEditor | None = None,
+    before_save: Callable[[DaemonConfig], None] | None = None,
 ) -> DaemonConfig:
     """Review existing settings, preserving credentials and the file's owner.
 
     A caller coordinating a service change can supply an editor and call its
-    restore() method if updating the unit fails after the user saves.
+    restore() method if updating the unit fails after the user saves. before_save
+    checks service state while the original configuration is still on disk.
     """
     path = Path(path).expanduser().absolute()
     editor = ConfigEditor(path) if editor is None else editor
     if editor.path != path:
         raise ValueError("The editor belongs to a different configuration file.")
+
+    def save(config: DaemonConfig):
+        if before_save is not None:
+            before_save(config)
+        editor.save(config)
+
     try:
         return _collect_config(
             path,
@@ -303,7 +311,7 @@ def edit_config(
             ask_secret=ask_secret,
             tunnel_token=editor.config.tunnel_token,
             environment_tunnel_token="",
-            save=editor.save,
+            save=save,
             title="Configure",
         )
     except SetupCancelled:

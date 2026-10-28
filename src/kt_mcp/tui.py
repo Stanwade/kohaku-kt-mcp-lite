@@ -1,20 +1,32 @@
 """A curses control panel; systemd retains ownership when the panel exits."""
 
 import argparse
+import json
 import locale
 import os
 import shlex
+import stat
 import sys
 import time
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 from kt_mcp.daemon import client_url, default_config_path, load_config, startup_url
 from kt_mcp.desktop import client_configuration
-from kt_mcp.onboarding import SetupCancelled, setup_config
-from kt_mcp.service import ServiceError, ServiceManager
+from kt_mcp.managed_service import (
+    ManagedServiceError,
+    assert_external_process,
+    inspect_service,
+    restore_unit,
+    start_service,
+    stop_service,
+)
+from kt_mcp.onboarding import ConfigEditor, SetupCancelled, edit_config, setup_config
+from kt_mcp.service import ServiceError, ServiceManager, render_unit
+from kt_mcp.terminal_style import TerminalStyle
 
-UI_ERRORS = (ValueError, TypeError, OSError, ServiceError)
+UI_ERRORS = (ValueError, TypeError, OSError, ServiceError, ManagedServiceError)
 
 
 def _clean(text: str) -> str:
@@ -157,17 +169,239 @@ class TerminalController:
         self.connection_detail = "The service has not been checked yet."
         self.connection_verified = False
         self.connection_tone = "warning"
+        self._configuration_paused = False
         self._secrets = {
             secret for secret in (self.config.token, self.config.tunnel_token) if secret
         }
 
     def redact(self, text: str) -> str:
-        self._secrets.update(
-            secret for secret in (self.config.token, self.config.tunnel_token) if secret
-        )
+        self._remember(self.config)
         for secret in sorted(self._secrets, key=len, reverse=True):
             text = text.replace(secret, "[REDACTED]")
         return text
+
+    def _remember(self, config):
+        self._secrets.update(
+            secret for secret in (config.token, config.tunnel_token) if secret
+        )
+
+    def _edit_binding(self):
+        return inspect_service(
+            self.manager.name,
+            self.manager.system,
+            expected_python=sys.executable,
+            expected_config=self.config_path,
+        )
+
+    def _check_manual_daemon(self):
+        """A missing unit does not prove a manually launched daemon has stopped."""
+        path = self.config_path.with_suffix(".status.json")
+        try:
+            descriptor = os.open(
+                path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            )
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise ManagedServiceError(
+                "Cannot verify the saved daemon startup record; check it before editing."
+            ) from None
+        try:
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_uid != self.config_path.stat().st_uid
+                ):
+                    raise ValueError("unsafe startup record")
+                raw = stream.read(65537)
+            if len(raw) > 65536:
+                raise ValueError("startup record is too large")
+            status = json.loads(raw)
+            pid = status.get("pid") if isinstance(status, dict) else None
+            if type(pid) is not int or pid <= 0:
+                raise ValueError("invalid startup PID")
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+        except (OSError, ValueError, OverflowError):
+            raise ManagedServiceError(
+                "Cannot confirm the manual daemon is stopped; check its startup record first."
+            ) from None
+        raise ManagedServiceError(
+            "A manual daemon recorded for this configuration is still running; "
+            "stop it outside this panel before editing. No process was stopped."
+        )
+
+    def configure(
+        self,
+        *,
+        ask: Callable[[str], str] | None = None,
+        ask_secret: Callable[[str], str] | None = None,
+    ):
+        """Stop after confirmation; keep the service stopped through review and save."""
+        self.note = ""
+        ask = input if ask is None else ask
+        if self.manager.system and os.geteuid() != 0:
+            raise PermissionError(
+                "System configuration changes require root; no automatic sudo."
+            )
+        editor = ConfigEditor(self.config_path)
+        self._remember(editor.config)
+        try:
+            binding = self._edit_binding()
+            if binding is not None:
+                assert_external_process(binding)
+            else:
+                self._check_manual_daemon()
+        except UI_ERRORS as exc:
+            self.note = self.redact(
+                f"Configuration not opened: {exc}. "
+                "Check systemd access and the selected unit before retrying."
+            )
+            raise
+
+        style = TerminalStyle()
+        print(style.text("Configure MCP", bold=True, color="cyan"))
+        if binding is None:
+            print("No service is registered. Edit the saved settings only.")
+            prompt = "Edit settings?"
+        else:
+            print("MCP will stop and stay offline while you edit.")
+            print("After saving or cancelling, press [s] Start.")
+            prompt = "Stop MCP and configure?"
+        while True:
+            try:
+                answer = ask(style.prompt(prompt, "y/N")).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+            if answer in {"", "n", "no", ":q"}:
+                self.note = "Configuration cancelled; service unchanged."
+                return
+            if answer in {"y", "yes"}:
+                break
+            print("Enter y to continue, or n to cancel.")
+
+        stopped = False
+        unit_attempted = False
+        candidate = None
+
+        def require_stopped(current):
+            nonlocal stopped
+            if (
+                current.status.get("ActiveState") not in {"inactive", "failed"}
+                or current.status.get("MainPID") != "0"
+            ):
+                stopped = False
+                stop_service(current)
+                stopped = True
+                raise ManagedServiceError(
+                    "MCP was started during editing and has been stopped; retry configuring."
+                )
+
+        def before_save(config):
+            nonlocal stopped
+            self._remember(config)
+            current = self._edit_binding()
+            if binding is None:
+                if current is not None:
+                    raise ManagedServiceError(
+                        "A service was registered during editing; reopen Configure to stop it."
+                    )
+                self._check_manual_daemon()
+                return
+            if current is None or (
+                current.unit_bytes != binding.unit_bytes
+                or current.owner_uid != binding.owner_uid
+                or current.owner_gid != binding.owner_gid
+                or current.unit_mode != binding.unit_mode
+                or current.unit_owner_uid != binding.unit_owner_uid
+                or current.unit_owner_gid != binding.unit_owner_gid
+            ):
+                stopped = False
+                raise ManagedServiceError(
+                    "The service changed during editing; configuration was not saved."
+                )
+            require_stopped(current)
+
+        try:
+            if binding is not None:
+                print("Stopping MCP...")
+                stop_service(binding)
+                stopped = True
+                self._configuration_paused = True
+                print(style.text("MCP stopped.", bold=True, color="yellow"))
+            edited = edit_config(
+                self.config_path,
+                ask=ask,
+                ask_secret=ask_secret,
+                editor=editor,
+                before_save=before_save,
+            )
+            self._remember(edited)
+            if binding is not None:
+                candidate = render_unit(
+                    self.config_path,
+                    system=self.manager.system,
+                    run_as=binding.run_as,
+                ).encode("utf-8")
+                unit_attempted = True
+                self.manager.install(
+                    self.config_path,
+                    replace=True,
+                    run_as=binding.run_as,
+                    now=False,
+                    enable=False,
+                    linger=False,
+                )
+                current = self._edit_binding()
+                if current is None or current.unit_bytes != candidate:
+                    stopped = False
+                    raise ManagedServiceError(
+                        "The updated service could not be confirmed."
+                    )
+                require_stopped(current)
+            self.config = edited
+            self.note = (
+                "Saved; MCP is stopped. [s] Start when ready."
+                if binding is not None
+                else (
+                    "Saved; register the system unit before starting."
+                    if self.manager.system
+                    else "Saved. [i] Install/start when ready."
+                )
+            )
+        except BaseException as exc:
+            recovery = []
+            if editor.saved:
+                if unit_attempted:
+                    try:
+                        restore_unit(binding, expected_unit_bytes=candidate)
+                    except UI_ERRORS as recovery_error:
+                        recovery.append(str(recovery_error))
+                try:
+                    editor.restore()
+                except UI_ERRORS as recovery_error:
+                    recovery.append(str(recovery_error))
+            state = (
+                "MCP remains stopped. [s] Start when ready."
+                if stopped
+                else "No service was started; check its state before continuing."
+            )
+            cancelled = isinstance(exc, (SetupCancelled, KeyboardInterrupt, EOFError))
+            self.note = self.redact(
+                (
+                    "Changes cancelled. "
+                    if cancelled
+                    else f"Configuration failed: {exc}. "
+                )
+                + state
+                + (" Recovery incomplete: " + "; ".join(recovery) if recovery else "")
+            )
+            if not cancelled:
+                raise
 
     def refresh(self):
         """Refresh process and startup evidence; logs are queried only on request."""
@@ -284,6 +518,8 @@ class TerminalController:
             ),
             "",
             "s starts; x stops; r restarts. l opens logs.",
+            "o stops MCP after confirmation and edits the saved settings.",
+            "After saving or cancelling, use s to start again.",
             (
                 "e enables boot. d only disables future automatic startup; "
                 "it does not stop a running service."
@@ -393,8 +629,17 @@ class TerminalController:
                     "Install a system unit first with service install --system --run-as USER."
                 )
             self.manager.install(self.config_path, now=True, linger=True)
+            self._configuration_paused = False
             self.note = "Service registered and enabled; check MCP startup in the logs."
         elif key in {"s", "x", "r", "e", "d"}:
+            if key in {"s", "r"} and self._configuration_paused:
+                binding = self._edit_binding()
+                if binding is None:
+                    raise ValueError("The configured service is no longer registered.")
+                self.status = start_service(binding)
+                self._configuration_paused = False
+                self.note = "MCP started; local connection verified."
+                return None
             action = {
                 "s": "start",
                 "x": "stop",
@@ -516,6 +761,34 @@ def _popup(screen, title: str, body: str):
         screen.timeout(250)
 
 
+def _configure(screen, controller: TerminalController):
+    """Temporarily restore a normal terminal for input() and hidden getpass()."""
+    import curses
+
+    curses.def_prog_mode()
+    curses.endwin()
+    try:
+        try:
+            controller.configure()
+        except UI_ERRORS as exc:
+            if not controller.note:
+                controller.note = controller.redact(f"Configuration not opened: {exc}")
+        print("\n" + TerminalStyle().text(controller.note, bold=True, color="yellow"))
+        try:
+            input("Press Enter to return to the panel: ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    finally:
+        curses.reset_prog_mode()
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        screen.keypad(True)
+        screen.timeout(250)
+        screen.clearok(True)
+
+
 def _screen(screen, controller: TerminalController):
     import curses
 
@@ -628,7 +901,7 @@ def _screen(screen, controller: TerminalController):
                 screen,
                 height - 2,
                 2,
-                "[u] Link [l] Logs [v] Details [?] Help [q] Quit panel",
+                "[o] Configure [u] Link [l] Logs [?] Help [q] Quit panel",
             )
             _put(
                 screen,
@@ -659,15 +932,19 @@ def _screen(screen, controller: TerminalController):
         if key < 0 or key > 255:
             continue
         character = chr(key).lower()
-        if character not in "isxredglcuv?":
+        if character not in "oisxredglcuv?":
             continue
         previous_note = controller.note
-        if character not in "v?":
+        if character not in "v?o":
             controller.note = "Working..."
             _put(screen, height - 1, 1, controller.note)
             screen.refresh()
         try:
-            popup = controller.act(character)
+            if character == "o":
+                _configure(screen, controller)
+                popup = None
+            else:
+                popup = controller.act(character)
             if popup:
                 _popup(screen, *popup)
                 controller.note = previous_note
