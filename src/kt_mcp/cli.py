@@ -7,12 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-import uvicorn
-
 from kt_mcp import __version__
-from kt_mcp.config import Config
-from kt_mcp.runtime import Runtime
-from kt_mcp.server import create_app, serve_stdio
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,10 +33,14 @@ def main(argv: list[str] | None = None) -> int:
         from kt_mcp.tui import main as tui_main
 
         return tui_main(argv[1:])
+    if argv and argv[0] == "update":
+        from kt_mcp.update import main as update_main
+
+        return update_main(argv[1:])
     parser = argparse.ArgumentParser(
         description="Kohaku KT MCP: standalone workspace tools derived from KohakuTerrarium.",
         epilog=(
-            "Linux commands: init, daemon, link, client-config, service, tui. "
+            "Linux commands: init, daemon, link, client-config, service, tui, update. "
             "Use kt-mcp COMMAND --help for details. "
             "On Linux, no arguments in an interactive terminal opens the TUI. "
             "Use --transport stdio to force the MCP protocol, including in a terminal. "
@@ -70,6 +69,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Allow file tools to access paths outside the workspace",
     )
     args = parser.parse_args(argv)
+    import uvicorn
+
+    from kt_mcp.config import Config
+    from kt_mcp.runtime import Runtime
+    from kt_mcp.server import create_app, serve_stdio
+
     logging.basicConfig(
         level=logging.WARNING,
         format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
