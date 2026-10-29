@@ -51,7 +51,7 @@ kt-mcp
 
 ```bash
 curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-  bash -s -- --version 0.3.4 \
+  bash -s -- --version 0.3.5 \
     --prefix "$HOME/apps/kt-mcp" \
     --bin-dir "$HOME/.local/bin" \
     --python /usr/bin/python3
@@ -76,7 +76,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 (
   set -o pipefail
   curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/download/install.sh |
-    bash -s -- --version 0.3.4
+    bash -s -- --version 0.3.5
 )
 ```
 
@@ -84,7 +84,7 @@ curl -fsSL https://github.com/Stanwade/kohaku-kt-mcp-lite/releases/latest/downlo
 
 ### 手动下载发行包
 
-从同一个 Release 下载 `kt-mcp-0.3.4-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
+从同一个 Release 下载 `kt-mcp-0.3.5-linux.tar.gz` 和 `SHA256SUMS`，放在同一目录并校验：
 
 ```bash
 sha256sum --ignore-missing -c SHA256SUMS
@@ -93,8 +93,8 @@ sha256sum --ignore-missing -c SHA256SUMS
 确认安装包的校验结果为 `OK` 后，解压并运行包内的本地安装器：
 
 ```bash
-tar -xzf kt-mcp-0.3.4-linux.tar.gz
-cd kt-mcp-0.3.4-linux
+tar -xzf kt-mcp-0.3.5-linux.tar.gz
+cd kt-mcp-0.3.5-linux
 bash ./install.sh
 ```
 
@@ -113,7 +113,7 @@ bash scripts/install_linux.sh
 本地安装器支持 `--prefix`、`--bin-dir`、`--python`、`--no-link`，也可用 `--source` 明确选择本地文件或项目目录：
 
 ```bash
-bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.4-py3-none-any.whl
+bash scripts/install_linux.sh --source /absolute/path/kohaku_kt_mcp-0.3.5-py3-none-any.whl
 ```
 
 `--source` 只用于本地安装器，在线入口不接受它。
@@ -125,7 +125,7 @@ v0.3.1 起，可直接使用 TUI 的 Actions → Software updates。命令行入
 ```bash
 kt-mcp update
 kt-mcp update --check                  # 只检查，不安装、不暂停服务
-kt-mcp update --version 0.3.4           # 指定正式版；不支持降级
+kt-mcp update --version 0.3.5           # 指定正式版；不支持降级
 kt-mcp update --name kt-mcp-dev         # 选择要恢复运行的用户实例
 ```
 
@@ -175,7 +175,9 @@ kt-mcp init --workspace "$HOME/workspace" --mode named --public-origin https://m
 unset TUNNEL_TOKEN
 ```
 
-以上初始化方式任选一种。编辑已有配置时保留 `version: 1` 和访问令牌，并保持 `chmod 600`。`KT_MCP_TOKEN`、`TUNNEL_TOKEN` 环境变量可覆盖文件中的令牌；systemd 不会自动继承交互 shell 的环境变量。
+以上初始化方式任选一种。编辑已有配置时保留 `version: 1` 和访问令牌，并保持 `chmod 600`。`KT_MCP_TOKEN`、`TUNNEL_TOKEN` 环境变量可覆盖文件中的令牌；systemd 服务本身不会自动继承某个交互终端中的临时环境变量。
+
+Linux 的 `bash` 和 `python` 命令工具会在每次调用时加载服务账户的 Bash 登录配置，再回到实例工作区执行命令。配置中导出的 PATH、代理和应用环境可直接使用，Bash 函数与别名也可用于 `bash` 工具。启动配置的输出单独返回，Python 工具仍使用 kt-mcp 安装环境的解释器。每次调用相互独立，临时环境切换与后续命令应写在同一次调用中；文件加载顺序和结果字段见 [命令工具参考](docs/tools.md#命令与后台任务)。
 
 ## 注册 systemd 后台服务
 
@@ -350,7 +352,7 @@ kt-mcp client-config
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python scripts/build_linux.py
-.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.4-linux.tar.gz --systemd
+.venv/bin/python scripts/verify_linux.py --archive dist/linux/kt-mcp-0.3.5-linux.tar.gz --systemd
 ```
 
 构建结果在 `dist/linux`，包括 wheel、sdist、Linux 安装包、独立的在线入口 `install.sh` 和外层 `SHA256SUMS`；安装包内另有文件校验清单。独立入口作为 Release 资产提供，包内的同名脚本仍用于安装本地 wheel。构建检查包版本一致性，安装包携带安装器及 LICENSE/NOTICE，不携带本机配置、令牌或虚拟环境。自定义输出目录使用 `--output`；复用已有构建依赖时可选择 `--no-isolation`。

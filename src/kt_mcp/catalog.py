@@ -110,9 +110,9 @@ def tools() -> list[Tool]:
                 (
                     "Run Bash in the workspace."
                     if name == "bash"
-                    else "Run code in a fresh Python subprocess; variables do not persist."
+                    else "Run code in a fresh subprocess using kt-mcp's Python interpreter; variables do not persist."
                 )
-                + " No sandbox. timeout defaults to 60 seconds (maximum 300). run_in_background returns a job_id; poll job_status/job_wait. Output is bounded.",
+                + " On Linux, loads Bash login settings; shell state is not shared across calls. No sandbox. timeout includes startup and defaults to 60 seconds (maximum 300). run_in_background returns a job_id; poll job_status/job_wait. Output is bounded.",
                 {
                     argument: TEXT,
                     "timeout": {

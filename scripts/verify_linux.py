@@ -341,6 +341,258 @@ async def verify_tools(url, version, workspace, interpreter, report):
         report["tool_count"] = len(passed)
 
 
+async def verify_shell_tools(url, version, workspace, interpreter, home, report):
+    checks = report["shell_environment"]
+    proxy = "http://127.0.0.1:18443"
+    banner = "kt-mcp installed shell fixture banner"
+    proxy_keys = (
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+    )
+    async with (
+        httpx.AsyncClient(trust_env=False, timeout=30) as http,
+        streamable_http_client(url, http_client=http) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        require(
+            (await session.initialize()).serverInfo.version == version,
+            "shell environment daemon version differs",
+        )
+
+        async def call(name, arguments):
+            result = await asyncio.wait_for(
+                session.call_tool(name, arguments), timeout=30
+            )
+            require(not result.isError, "shell environment MCP tool failed: " + name)
+            data = result.structuredContent
+            require(isinstance(data, dict), "missing shell environment tool result")
+            require(
+                data.get("exit_code") == 0 and "error" not in data,
+                "installed shell environment command failed: " + name,
+            )
+            require(
+                banner in data.get("startup_output", "")
+                and data.get("startup_truncated") is False,
+                "shell startup diagnostics were not captured separately",
+            )
+            return data
+
+        for revision in ("first", "second"):
+            if revision == "second":
+                report["stage"] = "installed shell profile refresh"
+                profile = home / ".bashrc"
+                profile.write_text(
+                    profile.read_text(encoding="utf-8").replace(
+                        "KT_MCP_SHELL_PROFILE_REV=first",
+                        "KT_MCP_SHELL_PROFILE_REV=second",
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                report["stage"] = "installed Bash shell environment"
+            shell = await call(
+                "bash",
+                {
+                    "command": (
+                        "type -t fixture_proxy\n"
+                        "type -t pon\n"
+                        "unset HTTPS_PROXY\n"
+                        "pon\n"
+                        "kt-mcp-shell-fixture\n"
+                        'printf \'%s\\n\' "$HTTPS_PROXY" "$KT_MCP_SHELL_INIT_COUNT" '
+                        '"$KT_MCP_SHELL_PROFILE_REV" "$PWD"\n'
+                    )
+                },
+            )
+            require(
+                shell["output"]
+                == "\n".join(
+                    (
+                        "function",
+                        "alias",
+                        "fixture-command-ok",
+                        proxy,
+                        "1",
+                        revision,
+                        str(workspace),
+                        "",
+                    )
+                ),
+                "Bash lost aliases, functions, proxy, user PATH or workspace",
+            )
+            checks["bash"] = (
+                "passed; aliases, functions, proxy, PATH, cwd and clean output"
+            )
+            report["stage"] = "installed Python shell environment"
+            python = await call(
+                "python",
+                {
+                    "code": (
+                        "import json, os, shutil, sys\n"
+                        f"keys = {proxy_keys!r}\n"
+                        "print(json.dumps({"
+                        "'proxy': {key: os.environ.get(key) for key in keys},"
+                        "'command': shutil.which('kt-mcp-shell-fixture'),"
+                        "'count': os.environ.get('KT_MCP_SHELL_INIT_COUNT'),"
+                        "'revision': os.environ.get('KT_MCP_SHELL_PROFILE_REV'),"
+                        "'cwd': os.getcwd(), 'executable': sys.executable}))\n"
+                    )
+                },
+            )
+            worker = json.loads(python["output"])
+            require(
+                worker["proxy"] == dict.fromkeys(proxy_keys, proxy)
+                and worker["command"] == str(home / "user-bin/kt-mcp-shell-fixture")
+                and worker["count"] == "1"
+                and worker["revision"] == revision
+                and worker["cwd"] == str(workspace),
+                "Python lost the initialized proxy, user PATH or workspace",
+            )
+            require(
+                Path(worker["executable"]).absolute() == interpreter.absolute(),
+                "shell initialization replaced the installed Python interpreter",
+            )
+            checks["python"] = "passed; proxy, PATH, cwd and installed interpreter"
+        checks["profile_refresh"] = (
+            "passed; each call loads the latest profile exactly once"
+        )
+
+
+def verify_shell_environment(
+    root, cli, interpreter, version, environment, report, sensitive
+):
+    """Exercise the installed daemon with an owned login profile and minimal PATH."""
+    checks = {
+        "bash": "not run",
+        "python": "not run",
+        "profile_refresh": "not run",
+        "cleanup": "not started",
+    }
+    report["shell_environment"] = checks
+    report["stage"] = "installed shell environment fixture"
+    fixture = root / "shell environment"
+    home = fixture / "home"
+    user_bin = home / "user-bin"
+    workspace = fixture / "workspace 中文"
+    user_bin.mkdir(parents=True)
+    workspace.mkdir()
+    (home / ".bash_profile").write_text('. "$HOME/.bashrc"\n', encoding="utf-8")
+    (home / ".bashrc").write_text(
+        "case $- in *i*) ;; *) return ;; esac\n"
+        "export KT_MCP_SHELL_INIT_COUNT=$(( ${KT_MCP_SHELL_INIT_COUNT:-0} + 1 ))\n"
+        'export PATH="$HOME/user-bin:$PATH"\n'
+        "fixture_proxy() {\n"
+        "    export http_proxy=http://127.0.0.1:18443\n"
+        '    export https_proxy="$http_proxy" all_proxy="$http_proxy"\n'
+        '    export HTTP_PROXY="$http_proxy" HTTPS_PROXY="$http_proxy" ALL_PROXY="$http_proxy"\n'
+        "}\n"
+        "alias pon=fixture_proxy\n"
+        "pon\n"
+        "export KT_MCP_SHELL_PROFILE_REV=first\n"
+        "printf 'kt-mcp installed shell fixture banner\\n'\n"
+        'cd "$HOME"\n',
+        encoding="utf-8",
+    )
+    executable = user_bin / "kt-mcp-shell-fixture"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'fixture-command-ok\\n'\n", encoding="utf-8"
+    )
+    executable.chmod(0o755)
+    fixture_environment = dict(environment)
+    for key in tuple(fixture_environment):
+        if (
+            key.upper().endswith("_PROXY")
+            or key.startswith(("CONDA_", "NVM_", "BASH_FUNC_", "KT_MCP_SHELL_"))
+            or key
+            in {
+                "BASH_ENV",
+                "ENV",
+                "SHELLOPTS",
+                "BASHOPTS",
+                "CDPATH",
+                "PROMPT_COMMAND",
+                "VIRTUAL_ENV",
+                "VIRTUAL_ENV_PROMPT",
+                "_CE_CONDA",
+                "_CE_M",
+            }
+        ):
+            fixture_environment.pop(key)
+    fixture_environment.update(
+        HOME=str(home),
+        SHELL="/bin/bash",
+        PATH=str(interpreter.parent)
+        + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        XDG_CONFIG_HOME=str(home / ".config"),
+        XDG_CACHE_HOME=str(home / ".cache"),
+        XDG_DATA_HOME=str(home / ".local/share"),
+    )
+    config = fixture / "config.json"
+    port = available_port()
+    command(
+        [
+            cli,
+            "init",
+            "--config",
+            config,
+            "--workspace",
+            workspace,
+            "--mode",
+            "local",
+            "--port",
+            str(port),
+        ],
+        cwd=fixture,
+        environment=fixture_environment,
+    )
+    token = json.loads(config.read_text(encoding="utf-8"))["token"]
+    sensitive.append(token)
+    url = f"http://127.0.0.1:{port}/mcp/{token}"
+    process = None
+    log_path = fixture / "daemon.log"
+    with log_path.open("wb") as log:
+        try:
+            report["stage"] = "installed shell environment daemon"
+            process = subprocess.Popen(
+                [str(cli), "daemon", "--config", str(config)],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                cwd=fixture,
+                env=fixture_environment,
+                start_new_session=True,
+            )
+            asyncio.run(wait_ready(url, process))
+            asyncio.run(
+                verify_shell_tools(url, version, workspace, interpreter, home, report)
+            )
+        finally:
+            checks["cleanup"] = "pending"
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=35)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                    raise RuntimeError(
+                        "shell environment daemon required a forced shutdown"
+                    ) from None
+            require(
+                not config.with_suffix(".status.json").exists(),
+                "shell environment daemon status remained after shutdown",
+            )
+            checks["cleanup"] = "passed; temporary daemon and status removed"
+    require(
+        token not in log_path.read_text(encoding="utf-8", errors="replace"),
+        "shell environment daemon leaked its access token in logs",
+    )
+
+
 async def verify_connection(url, version):
     async with (
         httpx.AsyncClient(trust_env=False, timeout=10) as http,
@@ -1021,6 +1273,9 @@ def verify(arguments, report, sensitive):
                 "installed daemon leaked its access token in logs",
             )
             report["credential_log_check"] = "passed; checked daemon output"
+        verify_shell_environment(
+            root, cli, interpreter, version, environment, report, sensitive
+        )
     report["stage"] = "complete"
     report["success"] = True
 
@@ -1047,6 +1302,7 @@ def main(argv=None):
         "tools": [],
         "tool_count": 0,
         "installed_venv_worker": False,
+        "shell_environment": "not started",
         "tui": "not requested",
         "tui_native_creation": "not requested",
         "tui_native_start": "not requested",

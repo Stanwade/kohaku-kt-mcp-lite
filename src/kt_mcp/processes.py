@@ -5,8 +5,10 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
+from kt_mcp import shell_startup
 from kt_mcp.bundled import python_command
 from kt_mcp.config import Config
 
@@ -36,6 +38,48 @@ def find_bash() -> str:
     raise ValueError("Bash was not found; install Git for Windows or Bash on PATH")
 
 
+class _Capture:
+    def __init__(self, maximum):
+        self.maximum = maximum
+        self.data = bytearray()
+        self.truncated = False
+
+    async def collect(self, reader):
+        while chunk := await reader.read(8192):
+            remaining = max(0, self.maximum - len(self.data))
+            self.data.extend(chunk[:remaining])
+            self.truncated |= len(chunk) > remaining
+
+    def text(self):
+        return bytes(self.data).decode("utf-8", errors="replace")
+
+
+async def _read_pipe(descriptor):
+    reader = asyncio.StreamReader()
+    pipe = os.fdopen(descriptor, "rb", buffering=0)
+    try:
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), pipe
+        )
+    except BaseException:
+        pipe.close()
+        raise
+    return reader, transport
+
+
+async def _wait_for_command(process, output_reader):
+    if sys.platform != "linux":
+        # Keep the existing wait/drain behavior on other platforms.
+        await asyncio.shield(output_reader)
+        await process.wait()
+        return
+    # Process.wait() can also wait for inherited stdout pipes to close, even
+    # after returncode is set. Observe the leader directly so a surviving child
+    # cannot hold those pipes open and postpone its own cleanup.
+    while process.returncode is None:
+        await asyncio.sleep(0.01)
+
+
 async def _terminate(process):
     if os.name == "nt":
         killer = await asyncio.create_subprocess_exec(
@@ -63,12 +107,19 @@ async def _terminate(process):
 
 
 async def execute(config: Config, kind: str, source: str, timeout: float = 60) -> dict:
-    """Run Bash or fresh Python with bounded combined stdout and stderr."""
-    command = (
-        [find_bash(), "--noprofile", "--norc", "-c", source]
-        if kind == "bash"
-        else await asyncio.to_thread(python_command, source)
+    """Run commands with bounded output and the Linux user's shell environment."""
+    arguments = (
+        [source] if kind == "bash" else await asyncio.to_thread(python_command, source)
     )
+    bash = None
+    if kind == "bash" or sys.platform == "linux":
+        try:
+            bash = find_bash()
+        except ValueError:
+            if kind == "bash":
+                raise
+            # A Python-only installation still works without a Bash dependency.
+    initialize = sys.platform == "linux" and bash is not None
     options = (
         {
             "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP
@@ -77,41 +128,115 @@ async def execute(config: Config, kind: str, source: str, timeout: float = 60) -
         if os.name == "nt"
         else {"start_new_session": True}
     )
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=config.workspace,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        **options,
-    )
-    output = bytearray()
-    truncated = False
-
-    async def collect():
-        nonlocal truncated
-        while chunk := await process.stdout.read(8192):
-            remaining = max(0, config.max_output_bytes - len(output))
-            output.extend(chunk[:remaining])
-            truncated |= len(chunk) > remaining
-        await process.wait()
-
-    reader = asyncio.create_task(collect())
+    output = _Capture(config.max_output_bytes)
+    startup = _Capture(config.max_output_bytes)
+    status = _Capture(2)
+    transports = []
+    readers = []
+    write_descriptors = []
+    process = None
     error = None
+
+    def close_writes():
+        while write_descriptors:
+            os.close(write_descriptors.pop())
+
     try:
-        await asyncio.wait_for(asyncio.shield(reader), timeout)
-    except asyncio.TimeoutError:
-        error = f"Command timed out after {timeout} seconds"
+        if initialize:
+            startup_read, startup_write = os.pipe()
+            write_descriptors.append(startup_write)
+            reader, transport = await _read_pipe(startup_read)
+            transports.append(transport)
+            readers.append(asyncio.create_task(startup.collect(reader)))
+            status_read, status_write = os.pipe()
+            write_descriptors.append(status_write)
+            reader, transport = await _read_pipe(status_read)
+            transports.append(transport)
+            readers.append(asyncio.create_task(status.collect(reader)))
+            command = shell_startup.command(
+                bash,
+                config.workspace,
+                kind,
+                arguments,
+                startup_write,
+                status_write,
+            )
+            options["pass_fds"] = (startup_write, status_write)
+        elif kind == "bash":
+            command = [bash, "--noprofile", "--norc", "-c", source]
+        else:
+            command = arguments
+
+        spawning = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                *command,
+                cwd=config.workspace,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                # The fixed bootstrap restores stderr before executing any
+                # profile; only Bash's initial no-terminal warnings are hidden.
+                stderr=(
+                    asyncio.subprocess.DEVNULL
+                    if initialize
+                    else asyncio.subprocess.STDOUT
+                ),
+                **options,
+            )
+        )
+        try:
+            process = await asyncio.shield(spawning)
+        except asyncio.CancelledError:
+            # Finish acquiring ownership before propagating cancellation.
+            # Otherwise a process created during this await can be orphaned.
+            try:
+                process = await spawning
+            except (OSError, ValueError):
+                process = None
+            if process is not None:
+                readers.append(asyncio.create_task(output.collect(process.stdout)))
+            raise
+        finally:
+            close_writes()
+
+        readers.append(asyncio.create_task(output.collect(process.stdout)))
+        try:
+            await asyncio.wait_for(_wait_for_command(process, readers[-1]), timeout)
+        except asyncio.TimeoutError:
+            error = f"Command timed out after {timeout} seconds"
     finally:
-        # Reap descendants even if the original shell has already exited.
-        await _terminate(process)
-        reader.cancel()
-        await asyncio.gather(reader, return_exceptions=True)
+        close_writes()
+        try:
+            if process is not None:
+                # Reap descendants before draining pipes, including startup
+                # children that survive the main shell's successful exit.
+                await _terminate(process)
+            if readers:
+                if process is None:
+                    for reader in readers:
+                        reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+        finally:
+            for reader in readers:
+                reader.cancel()
+            if readers:
+                await asyncio.gather(*readers, return_exceptions=True)
+            for transport in transports:
+                transport.close()
+
+    if initialize and bytes(status.data) != b"SR" and error is None:
+        error = (
+            "Shell initialization exited before the command started"
+            if bytes(status.data).startswith(b"S")
+            else "Shell initialization could not be started"
+        )
     result = {
-        "output": bytes(output).decode("utf-8", errors="replace"),
+        "output": output.text(),
         "exit_code": process.returncode,
-        "truncated": truncated,
+        "truncated": output.truncated,
     }
+    if startup.data or startup.truncated:
+        result["startup_output"] = startup.text()
+        result["startup_truncated"] = startup.truncated
     if error:
         result["error"] = error
     return result

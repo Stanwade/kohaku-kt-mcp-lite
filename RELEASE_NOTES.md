@@ -1,3 +1,11 @@
+# v0.3.5 — User shell environment for commands
+
+- Linux 的 Bash 和 Python 命令加载运行账户的 Bash 登录配置，沿用其中导出的 PATH、代理和应用环境。
+- Bash 工具可使用启动配置中的函数和别名；Python 工具继续使用 kt-mcp 安装环境的解释器。
+- 启动配置的输出单独返回，命令输出保持独立；初始化也纳入超时、取消和子进程清理。
+
+---
+
 # v0.3.4 — Reliable update service discovery
 
 - 更新时识别 systemd 中已无文件、无进程的失败实例残留，继续检查当前安装使用的服务。

@@ -53,7 +53,13 @@ kt-mcp 提供 12 个工作区工具，通过 [MCP 客户端](clients.md) 调用�
 
 ## 命令与后台任务
 
-Bash 和 Python 在实例工作区中启动，使用服务运行账户的文件系统、环境和网络权限。文件工具的路径范围设置只作用于文件工具。命令标准输入关闭，标准输出和标准错误合并到 `output`；每次 Python 调用使用新进程，变量不跨调用保留。
+Bash 和 Python 在实例工作区中启动，使用服务运行账户的文件系统和网络权限。文件工具的路径范围设置只作用于文件工具。命令标准输入关闭，标准输出和标准错误合并到 `output`。
+
+Linux 命令在每次调用时初始化运行账户的 Bash 登录环境：先读取 `/etc/profile`，再读取第一个可读的 `~/.bash_profile`、`~/.bash_login` 或 `~/.profile`。这些文件通常会加载 `~/.bashrc`；初始化具有交互式 Bash 标志，因此 `.bashrc` 中的交互检查可以通过。启动配置导出的 PATH、代理及应用环境用于 Bash 和 Python 工具，Bash 函数与别名可在 `bash` 工具中使用。初始化结束后回到实例工作区执行命令。
+
+每次调用使用独立进程，需要临时导出变量、切换目录或激活环境时，将这些操作与后续命令写在同一次 `bash` 调用中。`python` 工具继续使用 kt-mcp 安装环境的 Python；项目环境中的 Python 可通过 `bash` 调用。Windows 命令沿用应用启动时的环境。
+
+启动配置的输出单独放在 `startup_output`，截断时设置 `startup_truncated`；命令的 `output` 保持独立。命令超时包括初始化时间，取消会清理初始化和命令产生的所属子进程。
 
 默认调用等待命令结束。设置 `run_in_background: true` 时立即返回 `job_id`，随后通过 `job_status` 或 `job_wait` 获取状态和结果。后台执行沿用同一个命令超时设置。
 
@@ -70,7 +76,7 @@ Bash 和 Python 在实例工作区中启动，使用服务运行账户的文件�
 
 ## 结果格式
 
-工具返回结构化 JSON，以及包含相同 JSON 的文本块。命令结果包括 `output`、`exit_code`、`truncated`，执行异常或超时还包含 `error`。
+工具返回结构化 JSON，以及包含相同 JSON 的文本块。命令结果包括 `output`、`exit_code`、`truncated`，执行异常或超时还包含 `error`。Linux 启动配置产生输出时，结果还包括 `startup_output` 和 `startup_truncated`。
 
 前台命令失败及工具调用错误会设置 MCP `isError`。后台命令的执行结果位于任务的 `result` 字段，完成状态由 `state` 表示。
 
